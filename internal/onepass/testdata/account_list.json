@@ -1,0 +1,15 @@
+[
+  {
+    "url": "my.1password.com",
+    "email": "user@example.com",
+    "user_uuid": "USERUUID000000000000000001",
+    "account_uuid": "ACCTUUID000000000000000001"
+  },
+  {
+    "url": "example.1password.com",
+    "email": "user@example.com",
+    "user_uuid": "USERUUID000000000000000002",
+    "account_uuid": "ACCTUUID000000000000000002",
+    "shorthand": "work"
+  }
+]

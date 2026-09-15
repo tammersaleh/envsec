@@ -1,0 +1,61 @@
+{
+  "id": "ITEMID0000000000000000000001",
+  "title": "Grafana API token",
+  "version": 3,
+  "vault": {
+    "id": "VAULTID000000000000000000001",
+    "name": "Private"
+  },
+  "category": "API_CREDENTIAL",
+  "last_edited_at": "2026-09-10T15:04:05Z",
+  "created_at": "2026-09-01T12:00:00Z",
+  "updated_at": "2026-09-10T15:04:05Z",
+  "additional_information": "—",
+  "tags": [
+    "shell-env",
+    "infra"
+  ],
+  "fields": [
+    {
+      "id": "username",
+      "type": "STRING",
+      "purpose": "USERNAME",
+      "label": "username",
+      "value": "svc-grafana",
+      "reference": "op://Private/Grafana API token/username"
+    },
+    {
+      "id": "credential",
+      "type": "CONCEALED",
+      "label": "GRAFANA_TOKEN",
+      "value": "synthetic-value-0001",
+      "reference": "op://Private/Grafana API token/GRAFANA_TOKEN",
+      "password_details": {
+        "strength": "FANTASTIC"
+      }
+    },
+    {
+      "id": "notesPlain",
+      "type": "STRING",
+      "purpose": "NOTES",
+      "label": "notesPlain",
+      "reference": "op://Private/Grafana API token/notesPlain"
+    },
+    {
+      "id": "hostname",
+      "type": "URL",
+      "label": "hostname",
+      "value": "https://grafana.example.com",
+      "section": {
+        "id": "add more"
+      },
+      "reference": "op://Private/Grafana API token/hostname"
+    },
+    {
+      "id": "unlabeled",
+      "type": "CONCEALED",
+      "value": "synthetic-value-0002",
+      "reference": "op://Private/Grafana API token/unlabeled"
+    }
+  ]
+}
