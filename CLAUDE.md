@@ -196,3 +196,16 @@ stdlib unless SPEC says so. Go 1.25.
 - zsh: `local x` inside a loop re-declares an existing parameter and prints its
   value. Irrelevant now that the loader is Go, kept as a warning for the
   one-liner in `~/.zsh/d/secrets.zsh`.
+- Before creating or pushing to the public repo, grep the whole history for
+  the employer name, `tsaleh`, and MDM product names: `git log -p --all | rg -i
+  '<name>'`. The scaffold commit once carried an internal background doc and
+  the repo had to be `filter-repo`'d and force-pushed.
+- `git filter-repo` deletes the `origin` remote and strips GPG signatures.
+  Re-add the remote and re-sign with
+  `git rebase --root --exec 'git commit --amend --no-edit -S -q'`.
+- `op read` needs `--account` when more than one account is signed in, and a
+  failed `op read | gh secret set` still sets the secret, to an empty string.
+  Use `set -o pipefail` and re-check with `gh secret list`.
+- `RELEASE_PAT` is the "Github Release Automation Token" item in the personal
+  1Password vault, shared with the sibling CLIs.
+- Release-please cut the first release as `v1.0.0`, not `v0.1.0`.
