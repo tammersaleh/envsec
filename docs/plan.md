@@ -83,3 +83,38 @@ Native saves ~25ms per shell start out of ~700ms. Against that, a native binary 
 9. [ ] Rotation (v1 step 6) still outstanding; unchanged by v2.
 
 v1 (the manifest plus zsh loader this replaces) is documented in the private brain repo at `projects/dotfiles-secrets/plan.md`; it holds real item IDs and stays out of this public repo.
+
+## Codex review, 2026-09-14
+
+Thread `01a0a20d-d677-7c11-9f2b-bc6e580e80b5`. Findings sorted by what to do with them. SPEC.md is NOT yet updated for the "decide" items; do that after Tammer picks.
+
+### Decide (Tammer)
+
+- **Bundle item instead of index plus per-var items.** One keychain item, service `envsec`, account `bundle`, value = base64 JSON `{schema, generated_at, vars:[{name, value, account_uuid, account_url, item_id, field_id}]}`. Same ACL and blast radius as nine items (every shell reads every value anyway). One `security` call in `env`, atomic replacement in `sync`, no prune step, no partial-state window, and it removes the `security -i` output-framing risk (N stdout lines zipped to N vars shifts every later secret onto the wrong name if a middle item is missing). Codex's strongest point and I agree. Cost: `security find-generic-password` in Keychain Access shows one opaque blob instead of readable per-var entries. Payload for nine tokens is about 1 KB.
+- **Field-label rule.** Keep `^[A-Z][A-Z0-9_]*$` plus a denylist, or require a suffix like `_(TOKEN|KEY|PASSWORD|SECRET|CREDENTIAL)$`. My recommendation is regex plus denylist: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `UID`, `EUID`, `IFS`, `FPATH`, `ZDOTDIR`, `ENV`, `SHLVL`, `TERM`, `LANG`, `LC_*`, `DYLD_*`, `LD_*`, `NODE_OPTIONS`, `GIT_SSH_COMMAND`, `ENVSEC_*`. A denied label is a `sync` error naming the item.
+- **Cask vs formula.** Codex notes an unsigned CLI is cleaner as a formula. Tammer's other tools are casks with the quarantine-strip hook, and the keychain ACL is unaffected either way (`/usr/bin/security` is the trusted app). Recommend staying with the cask for consistency.
+
+### Adopt (no decision needed)
+
+- `env` assembles all output before emitting a byte, emits `builtin export --` lines, rejects NUL, CR, LF, invalid UTF-8, and C0/DEL control bytes. Round-trip tests run through real `zsh`, not Go-only quoting tests.
+- `env` also exports `ENVSEC_MANAGED_VARS` (space-separated names). On the next run it `unset`s any name in the inherited sentinel that is no longer managed, so a var removed from 1Password disappears from long-lived shells. `ENVSEC_*` is reserved.
+- Global vs per-item failure in `env`: unreadable keychain or bundle emits nothing and warns once, exit 4. A single invalid entry emits `unset VAR` for it and exports the rest, exit 1.
+- Document that `eval "$(envsec env)"` masks envsec's exit status; stderr is the only shell-start signal. One aggregated warning line, not one per var.
+- Document that the loader must never run under `set -x` / `zsh -x`; xtrace prints the expanded eval argument.
+- Overwrite inherited values by default (Tammer's call already, Codex concurs).
+- Serialize `sync` with a per-user lock file.
+- Provenance uses `account_uuid` and `user_uuid` from `op account list`, item ID and field ID; account URL is display only.
+- Account disappearance is not deletion. If the cache holds vars from an account absent from `op account list`, `sync` refuses to drop them without `--forget-account <uuid>`. Empty discovery across all accounts requires `--prune-all`.
+- Every account scan and item fetch must succeed before any keychain write. One unreadable account aborts sync: `sync aborted: account <name> could not be authorized; keychain cache unchanged; unlock 1Password and rerun`. Exit 2. Raw `op` stderr only under `--verbose`. No TTY: fail promptly, never prompt.
+- Revalidate each fetched item: fetch by ID with `--account`, confirm the tag is still present, check duplicate labels within the item.
+
+### Verify against `op` 2.38 before coding `internal/onepass`
+
+- `op item list --tags shell-env`: case sensitivity, hierarchical tags (`shell-env/foo`), items with additional tags, archived items, result limits, zero results.
+- Whether `op item get --format json` needs `--reveal` for CONCEALED values (v1 got values without it; confirm, and never cache a placeholder).
+- `op account list` output with the app locked, after cancel, after `op signout`, after forgetting an account.
+- Field JSON shape for a custom-labelled CONCEALED field vs the built-in `credential`/`password` fields.
+
+### Integration test additions
+
+Real keychain: create, update, read-back, special-character values, locked keychain behavior. Fakes: crash between write and commit, concurrent sync, account absent, prune refusal.

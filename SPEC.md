@@ -31,6 +31,9 @@ a conflict. `sync` and `check` report both items and write nothing.
 
 ## The keychain contract
 
+**Open (2026-09-14):** Codex review recommends replacing the index-plus-items layout below with a single bundle item (one base64 JSON blob holding every var plus provenance). Reasons and trade-offs in `docs/plan.md`, "Codex review". Tammer decides; do not implement `internal/keychain` until then. The rest of this section describes the layout as first planned.
+
+
 Login keychain, `~/Library/Keychains/login.keychain-db`, always named
 explicitly. All access through `/usr/bin/security`.
 
@@ -95,6 +98,24 @@ code), `detail`, `hint` (a concrete recovery command such as `op signin`).
 Exit codes: `0` success; `1` general or partial failure; `2` 1Password not
 signed in or locked past its prompt; `4` keychain unavailable (locked, missing
 file, `security` failure).
+
+## Hardening rules for `env`
+
+From the Codex review, adopted:
+
+- Assemble all output before writing any of it. Emit `builtin export -- VAR='...'` lines.
+- Reject values containing NUL, CR, LF, invalid UTF-8, or other C0/DEL control bytes. A rejected or missing indexed var produces `unset VAR` so a stale inherited value does not survive.
+- Also export `ENVSEC_MANAGED_VARS` (space-separated names). A following run unsets any inherited name in that list that is no longer managed. `ENVSEC_*` labels are refused at `sync`.
+- Denylisted labels (refused at `sync`): `PATH HOME USER LOGNAME SHELL TMPDIR UID EUID IFS FPATH ZDOTDIR ENV SHLVL TERM LANG`, and prefixes `LC_ DYLD_ LD_ ENVSEC_`, plus `NODE_OPTIONS GIT_SSH_COMMAND`. Final list is Tammer's call, see `docs/plan.md`.
+- Unreadable keychain or index: emit nothing, one warning, exit 4. Otherwise one aggregated warning line for all problems, exit 1.
+- `eval "$(envsec env)"` masks the exit status; stderr is the only shell-start signal. Never run the loader under xtrace.
+
+## Hardening rules for `sync`
+
+- Per-user lock file; a second `sync` waits or fails, never interleaves.
+- All accounts and all items must resolve before any keychain write. One failure aborts with the keychain unchanged, exit 2 for authorization, 1 otherwise.
+- An account present in the cache but absent from `op account list` is not pruned without `--forget-account <uuid>`. Zero in-scope items across all accounts requires `--prune-all`.
+- Provenance records `account_uuid`, `user_uuid`, item ID, field ID. Account URL is display only.
 
 ## Global flags
 
