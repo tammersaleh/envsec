@@ -42,7 +42,7 @@ session commits after each phase, reviews before push.
 
 ### Phase 3 (one agent)
 
-- [ ] `sync` and `check`, including the lock file, `--forget-account`,
+- [x] `sync` and `check`, including the lock file, `--forget-account`,
   `--prune-all`, exit 2 on authorization failure.
 
 ### Phase 4 (main session)
