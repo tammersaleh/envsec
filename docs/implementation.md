@@ -25,12 +25,12 @@ session commits after each phase, reviews before push.
 
 ### Phase 1 (parallel, three agents)
 
-- [ ] `internal/export` and `internal/bundle`. Label regex, denylist, field
+- [x] `internal/export` and `internal/bundle`. Label regex, denylist, field
   selection from a decoded item, conflict detection, shell quoting with
   control-byte rejection, bundle encode/decode/diff.
-- [ ] `internal/onepass`. `Client` interface, real impl over `op`, in-memory
+- [x] `internal/onepass`. `Client` interface, real impl over `op`, in-memory
   fake, scrubbed fixtures written from the documented `op` 2.38 JSON shape.
-- [ ] `internal/keychain`. `Store` interface (`ReadBundle`, `WriteBundle`),
+- [x] `internal/keychain`. `Store` interface (`ReadBundle`, `WriteBundle`),
   real impl over `/usr/bin/security`, in-memory fake, integration test on the
   `envsec-test.*` namespace.
 
@@ -74,3 +74,9 @@ session commits after each phase, reviews before push.
   timed out. Run `envsec check` against real items once signed in and fix the
   parser if the shape differs.
 - Plan step 2 (tag the items in 1Password) is outside this repo.
+- Phase 1 integration test on the real keychain: first write and read-back
+  passed, the `-U` overwrite timed out because an MDM agent had the login
+  keychain locked behind a password dialog. Rerun
+  `go test -tags=integration -run TestIntegrationLoginKeychain -v ./internal/keychain/`
+  once the dialog is dismissed. `security` exits 44 for a missing keychain
+  file too, so the store stats the path first and returns exit 4.
