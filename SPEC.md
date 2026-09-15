@@ -23,30 +23,53 @@ An item is in scope when it carries the tag `shell-env`, in any signed-in
 account, any vault the user can read.
 
 Within an in-scope item, every field with type `CONCEALED` whose label matches
-`^[A-Z][A-Z0-9_]*$` is exported under that label. Other fields are ignored, so
-an item can keep `username`, notes, and URLs. One item may yield several vars.
+`^[A-Z][A-Z0-9_]*$` and is not denylisted is exported under that label. Other
+fields are ignored, so an item can keep `username`, notes, and URLs. One item
+may yield several vars. A denylisted label is a `sync` error naming the item.
+
+Denylist (decided 2026-09-14): exact names `PATH HOME USER LOGNAME SHELL TMPDIR
+UID EUID IFS FPATH ZDOTDIR ENV SHLVL TERM LANG NODE_OPTIONS GIT_SSH_COMMAND`
+and prefixes `LC_ DYLD_ LD_ ENVSEC_`.
 
 Two in-scope fields with the same label, in one account or across accounts, are
 a conflict. `sync` and `check` report both items and write nothing.
 
 ## The keychain contract
 
-**Open (2026-09-14):** Codex review recommends replacing the index-plus-items layout below with a single bundle item (one base64 JSON blob holding every var plus provenance). Reasons and trade-offs in `docs/plan.md`, "Codex review". Tammer decides; do not implement `internal/keychain` until then. The rest of this section describes the layout as first planned.
-
-
 Login keychain, `~/Library/Keychains/login.keychain-db`, always named
-explicitly. All access through `/usr/bin/security`.
+explicitly. All access through `/usr/bin/security`. Decided 2026-09-14 after
+Codex review: one bundle item, not per-var items.
 
 | Item | Service | Account | Value |
 |---|---|---|---|
-| value | `envsec.<VAR>` | 1Password account URL, e.g. `my.1password.com` | the secret |
-| index | `envsec` | `index` | lines of `<VAR>\t<account URL>\t<item id>` |
+| bundle | `envsec` | `bundle` | base64 of the JSON below |
 
-Value items are created with `-T /usr/bin/security` so reads never prompt, and
-updated with `add-generic-password -U`. The index is rewritten last, after all
-value writes succeed, and is the only thing `env` and `list` enumerate from.
-Items in the keychain whose var is no longer in 1Password are deleted by `sync`
-and reported.
+```json
+{
+  "schema": 1,
+  "generated_at": "2026-09-14T17:02:11Z",
+  "vars": [
+    {
+      "name": "GRAFANA_TOKEN",
+      "value": "…",
+      "account_uuid": "…",
+      "user_uuid": "…",
+      "account_url": "my.1password.com",
+      "item_id": "…",
+      "field_id": "…"
+    }
+  ]
+}
+```
+
+Created with `-T /usr/bin/security` so reads never prompt; replaced with
+`add-generic-password -U`. Replacement is a single item write, so a shell sees
+either the old bundle or the new one, never a mix. There is nothing to prune.
+`env` and `list` read this one item with one `security` call. `account_url` is
+for display; identity is `account_uuid` plus `user_uuid`.
+
+Migration from v1 (`secrets-sync.*` items and the manifest): not
+handled by envsec. The v1 cleanup in the private brain plan deletes them by hand.
 
 ## Commands
 
@@ -55,17 +78,21 @@ and reported.
 For every account: list items tagged `shell-env`, fetch each, select fields.
 Validate every value: nonempty, no CR or LF. Detect conflicts. If anything
 failed, print the failures and exit 1 with the keychain untouched. Otherwise
-write every value, delete stale value items, rewrite the index. One Touch ID
-prompt per account. Output: one row per var `{"var":"GRAFANA_TOKEN","account":"...","status":"written"|"unchanged"|"deleted"}` and a `_meta` trailer with `error_count`. Never prints a value.
+build the new bundle in memory, write it in one keychain replacement. One
+Touch ID prompt per account. Output: one row per var
+`{"var":"GRAFANA_TOKEN","account":"my.1password.com","status":"added"|"unchanged"|"changed"|"removed"}`
+(diffed against the previous bundle) and a `_meta` trailer with `error_count`.
+Never prints a value.
 
 ### `envsec env`
 
-Read the index, then every value in a single `security -i` process. Print
-`export VAR='value'` per line to stdout, single-quoted with `'\''` escaping.
-Overwrites inherited values. A value containing a newline is not printed; a
-warning names it on stderr. A missing keychain item is a warning naming it on
-stderr; the rest still print. Exit 0 when all present, 1 when any missing or
-refused, 4 when the keychain is unavailable. Never calls `op`. Shell usage:
+Read the bundle with one `security find-generic-password`, decode, and print
+`builtin export -- VAR='value'` per line to stdout, single-quoted with `'\''`
+escaping.
+Overwrites inherited values. See "Hardening rules for `env`" for rejection,
+`unset`, and the managed-vars sentinel. Exit 0 when every var exported, 1 when
+any was rejected, 4 when the keychain or bundle is unreadable. Never calls
+`op`. Shell usage:
 
 ```zsh
 (( $+commands[envsec] )) && eval "$(envsec env)"
@@ -73,16 +100,16 @@ refused, 4 when the keychain is unavailable. Never calls `op`. Shell usage:
 
 ### `envsec check`
 
-Resolve from 1Password as `sync` does, read the keychain, compare in memory.
+Resolve from 1Password as `sync` does, read the bundle, compare in memory.
 One row per var with `status` of `ok`, `missing` (in 1Password, not in
-keychain), `different`, or `stale` (in keychain, not in 1Password). Conflicts
+bundle), `different`, or `stale` (in bundle, not in 1Password). Conflicts
 are reported as rows with `status: conflict`. No writes. Exit 1 if anything is
 not `ok`. Prints no values and no hashes.
 
 ### `envsec list`
 
-Print the index: `{"var":"...","account":"...","item_id":"..."}` per row. No
-values, no `op`.
+Print the bundle's provenance: `{"var":"...","account":"...","item_id":"...","field_id":"..."}`
+per row plus `generated_at` in `_meta`. No values, no `op`.
 
 ### `envsec version`
 
@@ -104,17 +131,17 @@ file, `security` failure).
 From the Codex review, adopted:
 
 - Assemble all output before writing any of it. Emit `builtin export -- VAR='...'` lines.
-- Reject values containing NUL, CR, LF, invalid UTF-8, or other C0/DEL control bytes. A rejected or missing indexed var produces `unset VAR` so a stale inherited value does not survive.
+- Reject values containing NUL, CR, LF, invalid UTF-8, or other C0/DEL control bytes. A rejected var produces `unset VAR` so a stale inherited value does not survive.
 - Also export `ENVSEC_MANAGED_VARS` (space-separated names). A following run unsets any inherited name in that list that is no longer managed. `ENVSEC_*` labels are refused at `sync`.
-- Denylisted labels (refused at `sync`): `PATH HOME USER LOGNAME SHELL TMPDIR UID EUID IFS FPATH ZDOTDIR ENV SHLVL TERM LANG`, and prefixes `LC_ DYLD_ LD_ ENVSEC_`, plus `NODE_OPTIONS GIT_SSH_COMMAND`. Final list is Tammer's call, see `docs/plan.md`.
-- Unreadable keychain or index: emit nothing, one warning, exit 4. Otherwise one aggregated warning line for all problems, exit 1.
+- The denylist (see "The 1Password contract") is enforced again in `env` on the decoded bundle; a bundle written by a future buggy `sync` must not export `PATH`.
+- Unreadable keychain or bundle (missing item, bad base64, bad JSON, unknown `schema`): emit nothing, one warning, exit 4. Otherwise one aggregated warning line for all problems, exit 1.
 - `eval "$(envsec env)"` masks the exit status; stderr is the only shell-start signal. Never run the loader under xtrace.
 
 ## Hardening rules for `sync`
 
 - Per-user lock file; a second `sync` waits or fails, never interleaves.
 - All accounts and all items must resolve before any keychain write. One failure aborts with the keychain unchanged, exit 2 for authorization, 1 otherwise.
-- An account present in the cache but absent from `op account list` is not pruned without `--forget-account <uuid>`. Zero in-scope items across all accounts requires `--prune-all`.
+- An account present in the current bundle but absent from `op account list` is not dropped without `--forget-account <uuid>`; without the flag `sync` aborts naming the account. Zero in-scope items across all accounts requires `--prune-all`.
 - Provenance records `account_uuid`, `user_uuid`, item ID, field ID. Account URL is display only.
 
 ## Global flags
@@ -125,6 +152,12 @@ From the Codex review, adopted:
 - `--timeout <duration>` - per external command. Default 60s for `op`
   (Touch ID), 10s for `security`.
 
+## Distribution
+
+Homebrew cask from `tammersaleh/homebrew-tap` (decided 2026-09-14, matching the
+sibling CLIs). The keychain ACL trusts `/usr/bin/security`, so the binary's
+signing state is irrelevant to keychain access.
+
 ## Implementation status
 
-Scaffold only. See `docs/plan.md` for the build order.
+Scaffold only. See `docs/plan.md` for the build order and the Codex review.

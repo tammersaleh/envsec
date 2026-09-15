@@ -86,9 +86,11 @@ v1 (the manifest plus zsh loader this replaces) is documented in the private bra
 
 ## Codex review, 2026-09-14
 
-Thread `01a0a20d-d677-7c11-9f2b-bc6e580e80b5`. Findings sorted by what to do with them. SPEC.md is NOT yet updated for the "decide" items; do that after Tammer picks.
+Thread `01a0a20d-d677-7c11-9f2b-bc6e580e80b5`. Findings sorted by what to do with them. SPEC.md reflects every item below.
 
-### Decide (Tammer)
+### Decided by Tammer, 2026-09-14: all three as recommended
+
+Bundle item, regex plus denylist, cask. SPEC.md updated. Kept here for the reasoning.
 
 - **Bundle item instead of index plus per-var items.** One keychain item, service `envsec`, account `bundle`, value = base64 JSON `{schema, generated_at, vars:[{name, value, account_uuid, account_url, item_id, field_id}]}`. Same ACL and blast radius as nine items (every shell reads every value anyway). One `security` call in `env`, atomic replacement in `sync`, no prune step, no partial-state window, and it removes the `security -i` output-framing risk (N stdout lines zipped to N vars shifts every later secret onto the wrong name if a middle item is missing). Codex's strongest point and I agree. Cost: `security find-generic-password` in Keychain Access shows one opaque blob instead of readable per-var entries. Payload for nine tokens is about 1 KB.
 - **Field-label rule.** Keep `^[A-Z][A-Z0-9_]*$` plus a denylist, or require a suffix like `_(TOKEN|KEY|PASSWORD|SECRET|CREDENTIAL)$`. My recommendation is regex plus denylist: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `UID`, `EUID`, `IFS`, `FPATH`, `ZDOTDIR`, `ENV`, `SHLVL`, `TERM`, `LANG`, `LC_*`, `DYLD_*`, `LD_*`, `NODE_OPTIONS`, `GIT_SSH_COMMAND`, `ENVSEC_*`. A denied label is a `sync` error naming the item.
