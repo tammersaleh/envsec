@@ -172,3 +172,7 @@ session commits after each phase, reviews before push.
   `go test -tags=integration -run TestIntegrationLoginKeychain -v ./internal/keychain/`
   once the dialog is dismissed. `security` exits 44 for a missing keychain
   file too, so the store stats the path first and returns exit 4.
+- The GitHub repo did not exist at first push; created public on 2026-09-15
+  with `gh repo create`. The `RELEASE_PAT` repository secret (release-please
+  and the tap push in `.github/workflows/release.yml`) must be set by hand
+  before the first release can cut; copy the setup from `slack-cli`.
