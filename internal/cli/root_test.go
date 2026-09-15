@@ -88,15 +88,6 @@ func TestHelpExitsZero(t *testing.T) {
 	}
 }
 
-func TestStubs(t *testing.T) {
-	for _, cmd := range []string{"sync", "check"} {
-		r := runCLI(t, Deps{Keychain: fakeBundle(t)}, cmd)
-		if r.code != 1 || !strings.Contains(r.stderr, `"error":"not_implemented"`) {
-			t.Errorf("%s: code=%d stderr=%q", cmd, r.code, r.stderr)
-		}
-	}
-}
-
 func TestEnvHappyPath(t *testing.T) {
 	r := runCLI(t, Deps{Keychain: fakeBundle(t, v("ZED", "z"), v("ALPHA", "it's $x `y`"))}, "env")
 	want := "builtin export -- ALPHA='it'\\''s $x `y`'\n" +
