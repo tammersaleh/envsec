@@ -209,3 +209,7 @@ stdlib unless SPEC says so. Go 1.25.
 - `RELEASE_PAT` is the "Github Release Automation Token" item in the personal
   1Password vault, shared with the sibling CLIs.
 - Release-please cut the first release as `v1.0.0`, not `v0.1.0`.
+- Onboarding items into envsec by CLI: pipe the edited JSON into
+  `op item edit <id> --account <url>` with NO `-` argument. `op item edit <id>
+  -` exits 0 and changes nothing. Re-read the item afterwards to confirm.
+  Values never enter argv this way. Done for the first nine items 2026-09-15.
