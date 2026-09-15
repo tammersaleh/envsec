@@ -35,6 +35,14 @@ keychain for the shell to `eval`. Shells never call `op`. See `SPEC.md` and
 Work is driven by `SPEC.md`. Every change - feature, bug fix, refactor -
 follows the same workflow. No shortcuts for "small" fixes:
 
+**Every feature is implemented by a sub-agent**, never in the main session.
+The main session reads `SPEC.md`, splits the work into features with disjoint
+file sets, dispatches one `general-purpose` sub-agent per feature (parallel
+when the file sets don't overlap), and keeps the plan file, commits, review,
+and release in the main session. Give each sub-agent the SPEC section, the
+package boundaries, the test conventions below, and the instruction to run
+`mise run check` before reporting.
+
 1. Read `SPEC.md` for the relevant command/feature.
 2. Work on main (personal project, no PRs) or a short branch merged locally.
 3. Red-green-refactor: write failing tests first, then implement, then clean up.
