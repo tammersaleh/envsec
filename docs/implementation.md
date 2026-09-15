@@ -47,7 +47,7 @@ session commits after each phase, reviews before push.
 
 ### Phase 4 (main session)
 
-- [ ] Code review sub-agent, fix findings, re-review.
+- [x] Code review sub-agent, fix findings, re-review.
 - [ ] Commit, push, wait for release, `brew upgrade`, verify installed binary.
 - [ ] Verify against real `op` (needs Touch ID, see below).
 
