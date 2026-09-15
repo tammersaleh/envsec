@@ -1,0 +1,63 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      pr: ${{ steps.release.outputs.pr }}
+    steps:
+      # Use RELEASE_PAT so the PR is user-attributed. GITHUB_TOKEN-created
+      # PRs do not trigger pull_request workflows, so CI would never run
+      # on the release PR and auto-merge would stay blocked forever.
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.RELEASE_PAT }}
+
+      # Auto-merge the release PR so releases ship unattended. Must use
+      # RELEASE_PAT (user-attributed), not GITHUB_TOKEN - otherwise the
+      # resulting merge commit won't trigger this workflow again to run
+      # goreleaser.
+      # The PR number comes through the environment, not string interpolation.
+      # Inlining ${{ steps.release.outputs.pr }} into the script put the PR body
+      # - which quotes commit subjects verbatim - inside single quotes, so one
+      # apostrophe in a commit subject ("can't") ended the quoted string and the
+      # step died with a bash syntax error. Releases then stalled silently: CI
+      # was green, the release PR just never got auto-merge enabled.
+      - name: Enable auto-merge on release PR
+        if: ${{ steps.release.outputs.pr }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+          RELEASE_PR: ${{ steps.release.outputs.pr }}
+          REPO: ${{ github.repository }}
+        run: |
+          pr_number=$(jq -r '.number' <<<"$RELEASE_PR")
+          gh pr merge --auto --squash "$pr_number" --repo "$REPO"
+
+  goreleaser:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: jdx/mise-action@v2
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.RELEASE_PAT }}

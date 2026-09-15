@@ -1,0 +1,40 @@
+[tools]
+go = "1.25"
+# golangci-lint v2 (v1.64.x predates Go 1.25 and its bundled x/tools emits
+# false-positive staticcheck findings on 1.25 sources).
+"go:github.com/golangci/golangci-lint/v2/cmd/golangci-lint" = "2.12.2"
+
+[tasks.build]
+run = "go build -o envsec ./cmd/envsec"
+
+[tasks.test]
+run = "go test ./..."
+
+[tasks.check]
+description = "Run test, lint, and build (matches pre-push hook)"
+depends = ["test", "lint", "build"]
+
+[tasks."test:race"]
+run = "go test -race ./..."
+
+[tasks."test:cover"]
+run = "go test -coverprofile=coverage.out ./... && go tool cover -html=coverage.out -o coverage.html"
+
+[tasks."test:int"]
+run = "go test -tags=integration ./..."
+
+[tasks.lint]
+run = "golangci-lint run ./..."
+
+[tasks.setup-hooks]
+description = "Configure git to use .githooks/"
+run = "git config core.hooksPath .githooks"
+
+[tasks.fmt]
+run = "gofmt -w . && goimports -w ."
+
+[tasks.generate]
+run = "go generate ./..."
+
+[tasks.clean]
+run = "rm -rf bin/ coverage.out coverage.html"

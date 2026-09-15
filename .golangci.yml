@@ -1,0 +1,12 @@
+version: "2"
+
+# Production code is linted at full strength. errcheck is disabled only for
+# tests: the findings there are all fixture setup (in-memory FS writes) and
+# httptest handler writes, where a failure surfaces as a test failure anyway,
+# so checking the returns adds noise without catching real bugs.
+linters:
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck

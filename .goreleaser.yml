@@ -1,0 +1,45 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: envsec
+    main: ./cmd/envsec
+    binary: envsec
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X github.com/tammersaleh/envsec/internal/cli.Version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  mode: append
+
+homebrew_casks:
+  - name: envsec
+    binaries:
+      - envsec
+    repository:
+      owner: tammersaleh
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Casks
+    homepage: https://github.com/tammersaleh/envsec
+    description: Export 1Password secrets as environment variables via the macOS keychain
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/envsec"]
+          end
