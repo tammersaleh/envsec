@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Schema is the bundle schema version this build reads and writes.
@@ -43,12 +44,21 @@ var (
 
 // Encode renders b as the keychain value: JSON, then standard base64.
 // Vars are sorted by name so equal bundles encode identically. Schema is
-// forced to Schema; a nil Vars encodes as an empty array.
+// forced to Schema; a nil Vars encodes as an empty array. Encode refuses any
+// bundle Decode would reject (zero GeneratedAt, a var with an empty field
+// other than Value, duplicate names) so a buggy writer cannot poison the
+// keychain. The error never carries a value.
 func Encode(b Bundle) ([]byte, error) {
 	b.Schema = Schema
 	b.Vars = slices.Clone(b.Vars)
 	if b.Vars == nil {
 		b.Vars = []Var{}
+	}
+	if b.GeneratedAt.IsZero() {
+		return nil, errors.New("encode bundle: generated_at is zero")
+	}
+	if err := validateVars(b.Vars); err != nil {
+		return nil, fmt.Errorf("encode bundle: %w", err)
 	}
 	slices.SortFunc(b.Vars, func(a, c Var) int { return strings.Compare(a.Name, c.Name) })
 	raw, err := json.Marshal(b)
@@ -58,23 +68,103 @@ func Encode(b Bundle) ([]byte, error) {
 	return []byte(base64.StdEncoding.EncodeToString(raw)), nil
 }
 
-// Decode parses a keychain value written by Encode.
+// wire is the decoded JSON before validation. Pointers distinguish absent
+// and null from the zero value.
+type wire struct {
+	Schema      int         `json:"schema"`
+	GeneratedAt *string     `json:"generated_at"`
+	Vars        *[]*wireVar `json:"vars"`
+}
+
+// wireVar is one vars entry before validation. Value is a pointer so a
+// missing or null value is told apart from an empty string.
+type wireVar struct {
+	Name        string  `json:"name"`
+	Value       *string `json:"value"`
+	AccountUUID string  `json:"account_uuid"`
+	UserUUID    string  `json:"user_uuid"`
+	AccountURL  string  `json:"account_url"`
+	ItemID      string  `json:"item_id"`
+	FieldID     string  `json:"field_id"`
+}
+
+// Decode parses a keychain value written by Encode. Every structural
+// problem is ErrBadJSON: invalid UTF-8 anywhere in the decoded document, a
+// missing, null, malformed, or zero generated_at, a missing or null vars, a
+// null vars entry, a var with a missing or null value, a var with an empty
+// name, account_uuid, user_uuid, account_url, item_id, or field_id, or two
+// vars with the same name. Error text wraps the sentinel with a fixed phrase
+// and never quotes the underlying json or time error, because those echo
+// bundle content.
 func Decode(data []byte) (Bundle, error) {
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
 	if err != nil {
 		return Bundle{}, fmt.Errorf("%w: %v", ErrBadBase64, err)
 	}
-	var b Bundle
-	if err := json.Unmarshal(raw, &b); err != nil {
+	if !utf8.Valid(raw) {
+		return Bundle{}, fmt.Errorf("%w: invalid UTF-8", ErrBadJSON)
+	}
+	var w wire
+	if err := json.Unmarshal(raw, &w); err != nil {
+		return Bundle{}, fmt.Errorf("%w: unmarshal failed", ErrBadJSON)
+	}
+	if w.Schema != Schema {
+		return Bundle{}, fmt.Errorf("%w: got %d, want %d", ErrUnknownSchema, w.Schema, Schema)
+	}
+	if w.GeneratedAt == nil {
+		return Bundle{}, fmt.Errorf("%w: missing generated_at", ErrBadJSON)
+	}
+	at, err := time.Parse(time.RFC3339Nano, *w.GeneratedAt)
+	if err != nil || at.IsZero() {
+		return Bundle{}, fmt.Errorf("%w: generated_at is not a valid timestamp", ErrBadJSON)
+	}
+	if w.Vars == nil {
+		return Bundle{}, fmt.Errorf("%w: missing vars", ErrBadJSON)
+	}
+	vars := make([]Var, 0, len(*w.Vars))
+	for i, wv := range *w.Vars {
+		if wv == nil {
+			return Bundle{}, fmt.Errorf("%w: vars[%d] is null", ErrBadJSON, i)
+		}
+		if wv.Value == nil {
+			return Bundle{}, fmt.Errorf("%w: vars[%d] has no value", ErrBadJSON, i)
+		}
+		vars = append(vars, Var{
+			Name: wv.Name, Value: *wv.Value,
+			AccountUUID: wv.AccountUUID, UserUUID: wv.UserUUID, AccountURL: wv.AccountURL,
+			ItemID: wv.ItemID, FieldID: wv.FieldID,
+		})
+	}
+	if err := validateVars(vars); err != nil {
 		return Bundle{}, fmt.Errorf("%w: %v", ErrBadJSON, err)
 	}
-	if b.Schema != Schema {
-		return Bundle{}, fmt.Errorf("%w: got %d, want %d", ErrUnknownSchema, b.Schema, Schema)
+	return Bundle{Schema: w.Schema, GeneratedAt: at, Vars: vars}, nil
+}
+
+// validateVars enforces the per-var rules shared by Encode and Decode: every
+// field but Value is nonempty and names are unique. Errors name the index,
+// never the content, because a name or value may be anything.
+func validateVars(vars []Var) error {
+	seen := make(map[string]int, len(vars))
+	for i, v := range vars {
+		for _, f := range []struct{ name, value string }{
+			{"name", v.Name},
+			{"account_uuid", v.AccountUUID},
+			{"user_uuid", v.UserUUID},
+			{"account_url", v.AccountURL},
+			{"item_id", v.ItemID},
+			{"field_id", v.FieldID},
+		} {
+			if f.value == "" {
+				return fmt.Errorf("vars[%d] has an empty %s", i, f.name)
+			}
+		}
+		if j, dup := seen[v.Name]; dup {
+			return fmt.Errorf("vars[%d] repeats the name of vars[%d]", i, j)
+		}
+		seen[v.Name] = i
 	}
-	if b.Vars == nil {
-		b.Vars = []Var{}
-	}
-	return b, nil
+	return nil
 }
 
 // Status is a per-var comparison result.

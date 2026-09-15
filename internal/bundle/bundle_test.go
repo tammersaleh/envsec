@@ -118,12 +118,138 @@ func TestDecodeErrors(t *testing.T) {
 		{"json wrong type", b64(`[]`), ErrBadJSON},
 		{"schema 0", b64(`{"schema":0,"vars":[]}`), ErrUnknownSchema},
 		{"schema 2", b64(`{"schema":2,"vars":[]}`), ErrUnknownSchema},
+		{"schema only", b64(`{"schema":1}`), ErrBadJSON},
+		{"vars null", b64(`{"schema":1,"generated_at":"2026-09-14T17:02:11Z","vars":null}`), ErrBadJSON},
+		{"vars missing", b64(`{"schema":1,"generated_at":"2026-09-14T17:02:11Z"}`), ErrBadJSON},
+		{"generated_at missing", b64(`{"schema":1,"vars":[]}`), ErrBadJSON},
+		{"generated_at null", b64(`{"schema":1,"generated_at":null,"vars":[]}`), ErrBadJSON},
+		{"generated_at zero", b64(`{"schema":1,"generated_at":"0001-01-01T00:00:00Z","vars":[]}`), ErrBadJSON},
+		{"generated_at malformed", b64(`{"schema":1,"generated_at":"yesterday","vars":[]}`), ErrBadJSON},
+		{"generated_at wrong type", b64(`{"schema":1,"generated_at":5,"vars":[]}`), ErrBadJSON},
+		{"invalid utf8 in value", b64("{\"schema\":1,\"generated_at\":\"2026-09-14T17:02:11Z\",\"vars\":[{\"name\":\"A\",\"value\":\"\xff\"}]}"), ErrBadJSON},
+		{"invalid utf8 outside strings", b64("{\"schema\":1\xff}"), ErrBadJSON},
+		{"vars wrong type", b64(`{"schema":1,"generated_at":"2026-09-14T17:02:11Z","vars":{}}`), ErrBadJSON},
+		{"null var entry", b64(`{"schema":1,"generated_at":"2026-09-14T17:02:11Z","vars":[null]}`), ErrBadJSON},
+		{"null var entry after a good one", b64(`{"schema":1,"generated_at":"2026-09-14T17:02:11Z","vars":[` + goodVarJSON("A") + `,null]}`), ErrBadJSON},
+		{"var missing value", b64(varsJSON(`{"name":"A","account_uuid":"a","user_uuid":"u","account_url":"my.1password.com","item_id":"i","field_id":"f"}`)), ErrBadJSON},
+		{"var null value", b64(varsJSON(`{"name":"A","value":null,"account_uuid":"a","user_uuid":"u","account_url":"my.1password.com","item_id":"i","field_id":"f"}`)), ErrBadJSON},
+		{"var value wrong type", b64(varsJSON(`{"name":"A","value":5,"account_uuid":"a","user_uuid":"u","account_url":"my.1password.com","item_id":"i","field_id":"f"}`)), ErrBadJSON},
+		{"var empty name", b64(varsJSON(`{"name":"","value":"v","account_uuid":"a","user_uuid":"u","account_url":"my.1password.com","item_id":"i","field_id":"f"}`)), ErrBadJSON},
+		{"var missing name", b64(varsJSON(`{"value":"v","account_uuid":"a","user_uuid":"u","account_url":"my.1password.com","item_id":"i","field_id":"f"}`)), ErrBadJSON},
+		{"var empty account_uuid", b64(varsJSON(`{"name":"A","value":"v","account_uuid":"","user_uuid":"u","account_url":"my.1password.com","item_id":"i","field_id":"f"}`)), ErrBadJSON},
+		{"var empty user_uuid", b64(varsJSON(`{"name":"A","value":"v","account_uuid":"a","user_uuid":"","account_url":"my.1password.com","item_id":"i","field_id":"f"}`)), ErrBadJSON},
+		{"var empty account_url", b64(varsJSON(`{"name":"A","value":"v","account_uuid":"a","user_uuid":"u","account_url":"","item_id":"i","field_id":"f"}`)), ErrBadJSON},
+		{"var empty item_id", b64(varsJSON(`{"name":"A","value":"v","account_uuid":"a","user_uuid":"u","account_url":"my.1password.com","item_id":"","field_id":"f"}`)), ErrBadJSON},
+		{"var empty field_id", b64(varsJSON(`{"name":"A","value":"v","account_uuid":"a","user_uuid":"u","account_url":"my.1password.com","item_id":"i","field_id":""}`)), ErrBadJSON},
+		{"var missing field_id", b64(varsJSON(`{"name":"A","value":"v","account_uuid":"a","user_uuid":"u","account_url":"my.1password.com","item_id":"i"}`)), ErrBadJSON},
+		{"duplicate names", b64(varsJSON(goodVarJSON("A") + `,` + goodVarJSON("A"))), ErrBadJSON},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Decode(tc.data)
 			if !errors.Is(err, tc.want) {
 				t.Errorf("Decode() error = %v, want errors.Is %v", err, tc.want)
+			}
+		})
+	}
+}
+
+// goodVarJSON is one fully populated var entry named name.
+func goodVarJSON(name string) string {
+	return `{"name":"` + name + `","value":"v","account_uuid":"a","user_uuid":"u","account_url":"my.1password.com","item_id":"i-` + name + `","field_id":"f"}`
+}
+
+// varsJSON wraps entries in an otherwise valid bundle document.
+func varsJSON(entries string) string {
+	return `{"schema":1,"generated_at":"2026-09-14T17:02:11Z","vars":[` + entries + `]}`
+}
+
+func TestDecodeAcceptsEmptyValueAndEmptyVars(t *testing.T) {
+	// An empty value is rejected at sync, not here; a bundle carrying one is
+	// still well-formed.
+	b64 := func(s string) []byte { return []byte(base64.StdEncoding.EncodeToString([]byte(s))) }
+	for name, doc := range map[string]string{
+		"empty vars":  varsJSON(``),
+		"empty value": varsJSON(`{"name":"A","value":"","account_uuid":"a","user_uuid":"u","account_url":"my.1password.com","item_id":"i","field_id":"f"}`),
+		"two vars":    varsJSON(goodVarJSON("A") + `,` + goodVarJSON("B")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			b, err := Decode(b64(doc))
+			if err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+			if b.Vars == nil {
+				t.Fatal("Vars is nil")
+			}
+		})
+	}
+}
+
+func TestDecodeVarErrorsNeverQuoteContent(t *testing.T) {
+	const mark = "MARKER-7f3a"
+	b64 := func(s string) []byte { return []byte(base64.StdEncoding.EncodeToString([]byte(s))) }
+	for name, doc := range map[string]string{
+		"missing value":  varsJSON(`{"name":"` + mark + `","account_uuid":"a","user_uuid":"u","account_url":"x","item_id":"i","field_id":"f"}`),
+		"duplicate name": varsJSON(goodVarJSON(mark) + `,` + goodVarJSON(mark)),
+		"empty item_id":  varsJSON(`{"name":"` + mark + `","value":"` + mark + `","account_uuid":"a","user_uuid":"u","account_url":"x","item_id":"","field_id":"f"}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Decode(b64(doc))
+			if err == nil {
+				t.Fatal("want error")
+			}
+			if strings.Contains(err.Error(), mark) {
+				t.Errorf("error text carries bundle content: %q", err.Error())
+			}
+		})
+	}
+}
+
+func TestEncodeRefusesWhatDecodeRejects(t *testing.T) {
+	good := mkVar("A", "v", "1")
+	with := func(mut func(*Var)) Var { v := good; mut(&v); return v }
+	cases := map[string]Bundle{
+		"zero generated_at":  {Vars: []Var{good}},
+		"empty name":         {GeneratedAt: when, Vars: []Var{with(func(v *Var) { v.Name = "" })}},
+		"empty account_uuid": {GeneratedAt: when, Vars: []Var{with(func(v *Var) { v.AccountUUID = "" })}},
+		"empty user_uuid":    {GeneratedAt: when, Vars: []Var{with(func(v *Var) { v.UserUUID = "" })}},
+		"empty account_url":  {GeneratedAt: when, Vars: []Var{with(func(v *Var) { v.AccountURL = "" })}},
+		"empty item_id":      {GeneratedAt: when, Vars: []Var{with(func(v *Var) { v.ItemID = "" })}},
+		"empty field_id":     {GeneratedAt: when, Vars: []Var{with(func(v *Var) { v.FieldID = "" })}},
+		"duplicate names":    {GeneratedAt: when, Vars: []Var{good, mkVar("A", "other", "2")}},
+	}
+	for name, b := range cases {
+		t.Run(name, func(t *testing.T) {
+			data, err := Encode(b)
+			if err == nil {
+				_, derr := Decode(data)
+				t.Fatalf("Encode accepted a bundle Decode rejects (Decode: %v)", derr)
+			}
+			if strings.Contains(err.Error(), "other") || strings.Contains(err.Error(), `"v"`) {
+				t.Errorf("Encode error carries a value: %q", err.Error())
+			}
+		})
+	}
+}
+
+func TestDecodeErrorsNeverQuoteContent(t *testing.T) {
+	const mark = "MARKER-7f3a"
+	b64 := func(s string) []byte { return []byte(base64.StdEncoding.EncodeToString([]byte(s))) }
+	inputs := map[string][]byte{
+		"malformed timestamp": b64(`{"schema":1,"generated_at":"` + mark + `","vars":[]}`),
+		"syntax error":        b64(`{"schema":1,"generated_at":"2026-09-14T17:02:11Z","vars":[` + mark),
+		"wrong type":          b64(`{"schema":"` + mark + `","vars":[]}`),
+		"invalid utf8":        b64("{\"schema\":1,\"generated_at\":\"" + mark + "\xff\",\"vars\":[]}"),
+		"top-level string":    b64(`"` + mark + `"`),
+	}
+	for name, data := range inputs {
+		t.Run(name, func(t *testing.T) {
+			_, err := Decode(data)
+			if err == nil {
+				t.Fatal("want error")
+			}
+			if strings.Contains(err.Error(), mark) {
+				t.Errorf("error text carries bundle content: %q", err.Error())
 			}
 		})
 	}

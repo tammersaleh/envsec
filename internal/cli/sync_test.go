@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -146,11 +147,11 @@ func TestSyncSelectionErrorsLeaveKeychainUntouched(t *testing.T) {
 		want string
 	}{
 		"denylisted": {varItem("PATH", "x"),
-			`{"var":"","status":"error","detail":"item \"Title PATH\" (item-path): label PATH is denylisted"}`},
+			`{"var":"PATH","account":"my.1password.com","status":"error","detail":"item \"Title PATH\" (item-path): label PATH is denylisted"}`},
 		"empty value": {opItem("item-e", "Title E", onepass.Field{ID: "field-e", Type: "CONCEALED", Label: "E"}),
-			`{"var":"","status":"error","detail":"item \"Title E\" (item-e): E is empty"}`},
+			`{"var":"E","account":"my.1password.com","status":"error","detail":"item \"Title E\" (item-e): E is empty"}`},
 		"newline": {varItem("NL", "a\nb"),
-			`{"var":"","status":"error","detail":"item \"Title NL\" (item-nl): NL contains a newline"}`},
+			`{"var":"NL","account":"my.1password.com","status":"error","detail":"item \"Title NL\" (item-nl): NL contains a newline"}`},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -180,7 +181,7 @@ func twoAccountOp() *onepass.Fake {
 func TestSyncConflictAcrossAccounts(t *testing.T) {
 	kc := &keychain.Fake{}
 	r := runSync(t, Deps{Keychain: kc, OnePass: twoAccountOp()})
-	want := `{"var":"TOKEN","status":"error","detail":"conflict: TOKEN is defined by item item-token (my.1password.com) and item item-token2 (other.1password.com)"}` + "\n" +
+	want := `{"var":"TOKEN","account":"","status":"conflict","detail":"conflict: TOKEN is defined by item item-token (my.1password.com) and item item-token2 (other.1password.com)"}` + "\n" +
 		`{"_meta":{"has_more":false,"error_count":1}}` + "\n"
 	if r.stdout != want {
 		t.Fatalf("stdout = %q\nwant %q", r.stdout, want)
@@ -190,11 +191,78 @@ func TestSyncConflictAcrossAccounts(t *testing.T) {
 	}
 }
 
+func TestSyncSameLabelTwiceInOneItemIsConflict(t *testing.T) {
+	kc := &keychain.Fake{}
+	twice := opItem("item-twice", "Twice", secret("TOKEN", "one"), onepass.Field{ID: "field-token-2", Type: "CONCEALED", Label: "TOKEN", Value: marker + "-two"})
+	r := runSync(t, Deps{Keychain: kc, OnePass: fakeOp(twice)})
+	want := `{"var":"TOKEN","account":"","status":"conflict","detail":"conflict: TOKEN is defined by item item-twice field field-token (my.1password.com) and item item-twice field field-token-2 (my.1password.com)"}` + "\n" +
+		`{"_meta":{"has_more":false,"error_count":1}}` + "\n"
+	if r.stdout != want {
+		t.Fatalf("stdout = %q\nwant %q", r.stdout, want)
+	}
+	if r.code != 1 || kc.Writes != 0 {
+		t.Fatalf("code=%d writes=%d", r.code, kc.Writes)
+	}
+}
+
+// TestSyncNullOrMissingFieldsOnFetchedItemAbortsWithoutWrite drives the real
+// onepass client with a scripted runner. The old bundle holds vars from items
+// A and B; item A's fetch comes back with the right id and tag but no fields
+// array. Treating that as "no fields" would silently drop A's var, so it must
+// be a failure with no write.
+func TestSyncNullOrMissingFieldsOnFetchedItemAbortsWithoutWrite(t *testing.T) {
+	for name, getA := range map[string]string{
+		"fields null":    `{"id":"item-alpha","title":"Title ALPHA","tags":["shell-env"],"fields":null}`,
+		"fields missing": `{"id":"item-alpha","title":"Title ALPHA","tags":["shell-env"]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			kc := fakeBundle(t, sv("ALPHA", "a"), sv("BETA", "b"))
+			mustJSON := func(v any) []byte {
+				b, err := json.Marshal(v)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return b
+			}
+			accounts := mustJSON([]onepass.Account{acct1})
+			list := mustJSON([]onepass.Item{
+				{ID: "item-alpha", Title: "Title ALPHA", Tags: []string{"shell-env"}},
+				{ID: "item-beta", Title: "Title BETA", Tags: []string{"shell-env"}},
+			})
+			getB := mustJSON(varItem("BETA", "b"))
+			runner := func(_ context.Context, _ string, args ...string) ([]byte, []byte, int, error) {
+				switch {
+				case args[0] == "account":
+					return accounts, nil, 0, nil
+				case args[0] == "item" && args[1] == "list":
+					return list, nil, 0, nil
+				case args[0] == "item" && args[1] == "get" && args[2] == "item-alpha":
+					return []byte(getA), nil, 0, nil
+				case args[0] == "item" && args[1] == "get" && args[2] == "item-beta":
+					return getB, nil, 0, nil
+				}
+				t.Fatalf("unexpected op args %q", args)
+				return nil, nil, 1, nil
+			}
+			op := onepass.New(onepass.Options{Runner: runner})
+			r := runSync(t, Deps{Keychain: kc, OnePass: op})
+			if r.code != 1 || r.stdout != "" || kc.Writes != 0 {
+				t.Fatalf("code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
+			}
+			for _, s := range []string{`"error":"onepassword_failed"`, "get item item-alpha", "fields", "keychain cache unchanged"} {
+				if !strings.Contains(r.stderr, s) {
+					t.Errorf("stderr %q lacks %q", r.stderr, s)
+				}
+			}
+		})
+	}
+}
+
 func TestSyncAuthErrorFromAccounts(t *testing.T) {
 	kc := fakeBundle(t, sv("ALPHA", "a"))
 	op := &onepass.Fake{Errs: onepass.FakeErrs{Accounts: &onepass.AuthError{Detail: "not signed in"}}}
 	r := runSync(t, Deps{Keychain: kc, OnePass: op})
-	want := `{"error":"onepassword_unauthorized","detail":"sync aborted: 1Password could not be authorized; keychain cache unchanged; unlock 1Password and rerun","hint":"op signin"}` + "\n"
+	want := `{"error":"onepassword_unauthorized","detail":"sync aborted: 1Password could not be authorized: not signed in; keychain cache unchanged; unlock 1Password and rerun","hint":"op signin"}` + "\n"
 	if r.code != 2 || r.stdout != "" || r.stderr != want || kc.Writes != 0 {
 		t.Fatalf("code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
 	}
@@ -233,7 +301,7 @@ func TestSyncAuthErrorOnSecondAccountGetItem(t *testing.T) {
 		return fake.GetItem(ctx, account, id)
 	}
 	r := runSync(t, Deps{Keychain: kc, OnePass: op})
-	want := `{"error":"onepassword_unauthorized","detail":"sync aborted: account other.1password.com could not be authorized; keychain cache unchanged; unlock 1Password and rerun","hint":"op signin --account other.1password.com"}` + "\n"
+	want := `{"error":"onepassword_unauthorized","detail":"sync aborted: account other.1password.com could not be authorized: Touch ID dismissed; keychain cache unchanged; unlock 1Password and rerun","hint":"op signin --account other.1password.com"}` + "\n"
 	if r.code != 2 || r.stdout != "" || r.stderr != want || kc.Writes != 0 {
 		t.Fatalf("code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
 	}
@@ -260,7 +328,7 @@ func TestSyncAccountVanished(t *testing.T) {
 		acct2.AccountUUID: {opItem("item-other", "Other", secret("OTHER", "o"))},
 	}}
 	r := runSync(t, Deps{Keychain: kc, OnePass: op})
-	want := `{"error":"account_missing","detail":"account ACCT (my.1password.com) is in the keychain bundle but not in op account list","hint":"envsec sync --forget-account ACCT"}` + "\n"
+	want := `{"error":"account_missing","detail":"account ACCT user USER (my.1password.com) is in the keychain bundle but not in op account list","hint":"envsec sync --forget-account ACCT"}` + "\n"
 	if r.code != 1 || r.stdout != "" || r.stderr != want || kc.Writes != 0 {
 		t.Fatalf("code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
 	}
@@ -276,10 +344,36 @@ func TestSyncAccountVanished(t *testing.T) {
 	}
 }
 
+func TestSyncSameAccountDifferentUserIsMissing(t *testing.T) {
+	// Same account UUID, new user UUID: a different identity. Not dropped
+	// silently; --forget-account on the account UUID forgets every old
+	// identity under it.
+	kc := fakeBundle(t, sv("ALPHA", "a"))
+	sameAcctNewUser := acct1
+	sameAcctNewUser.UserUUID = "USER-NEW"
+	op := &onepass.Fake{AccountList: []onepass.Account{sameAcctNewUser}, Items: map[string][]onepass.Item{
+		acct1.AccountUUID: {varItem("ALPHA", "a")},
+	}}
+	r := runSync(t, Deps{Keychain: kc, OnePass: op})
+	want := `{"error":"account_missing","detail":"account ACCT user USER (my.1password.com) is in the keychain bundle but not in op account list","hint":"envsec sync --forget-account ACCT"}` + "\n"
+	if r.code != 1 || r.stdout != "" || r.stderr != want || kc.Writes != 0 {
+		t.Fatalf("code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
+	}
+
+	r = runSync(t, Deps{Keychain: kc, OnePass: op}, "--forget-account", "ACCT")
+	wantOut := `{"var":"ALPHA","account":"my.1password.com","status":"changed"}` + "\n" + trailerOK
+	if r.code != 0 || r.stdout != wantOut || kc.Writes != 1 {
+		t.Fatalf("code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
+	}
+	if b := decodeFake(t, kc); len(b.Vars) != 1 || b.Vars[0].UserUUID != "USER-NEW" {
+		t.Fatalf("bundle = %+v", b)
+	}
+}
+
 func TestSyncPruneRefusedWithoutFlag(t *testing.T) {
 	kc := fakeBundle(t, sv("ALPHA", "a"), sv("ZED", "z"))
 	r := runSync(t, Deps{Keychain: kc, OnePass: fakeOp()})
-	want := `{"error":"prune_refused","detail":"1Password yielded no vars but the keychain bundle holds 2; refusing to empty it","hint":"envsec sync --prune-all"}` + "\n"
+	want := `{"error":"prune_refused","detail":"no items tagged \"shell-env\" in any account; the keychain bundle holds 2 var(s); refusing to write an empty bundle","hint":"envsec sync --prune-all"}` + "\n"
 	if r.code != 1 || r.stdout != "" || r.stderr != want || kc.Writes != 0 {
 		t.Fatalf("code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
 	}
@@ -295,11 +389,104 @@ func TestSyncPruneRefusedWithoutFlag(t *testing.T) {
 	}
 }
 
-func TestSyncZeroVarsFirstRunWritesEmptyBundle(t *testing.T) {
-	kc := &keychain.Fake{}
-	r := runSync(t, Deps{Keychain: kc, OnePass: fakeOp()})
-	if r.code != 0 || r.stdout != trailerOK || kc.Writes != 1 {
+func TestSyncZeroItemsFirstRunRefusedWithoutPruneAll(t *testing.T) {
+	// No in-scope items anywhere usually means the wrong tag or the wrong
+	// account, so an empty bundle needs --prune-all even on a first run.
+	for name, kc := range map[string]*keychain.Fake{
+		"no bundle":    {},
+		"empty bundle": fakeBundle(t),
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := runSync(t, Deps{Keychain: kc, OnePass: fakeOp()}, "--tag", "nope")
+			want := `{"error":"prune_refused","detail":"no items tagged \"nope\" in any account; the keychain bundle holds 0 var(s); refusing to write an empty bundle","hint":"envsec sync --prune-all"}` + "\n"
+			if r.code != 1 || r.stdout != "" || r.stderr != want || kc.Writes != 0 {
+				t.Fatalf("code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
+			}
+
+			r = runSync(t, Deps{Keychain: kc, OnePass: fakeOp()}, "--tag", "nope", "--prune-all")
+			if r.code != 0 || r.stdout != trailerOK || r.stderr != "" || kc.Writes != 1 {
+				t.Fatalf("with --prune-all: code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
+			}
+			if b := decodeFake(t, kc); len(b.Vars) != 0 {
+				t.Fatalf("bundle = %+v", b)
+			}
+		})
+	}
+}
+
+func TestSyncTaggedItemWithNoExportableFieldsIsInScope(t *testing.T) {
+	// The tag search found something, so the guard is satisfied even though
+	// it yields no vars; the old var is removed.
+	kc := fakeBundle(t, sv("ALPHA", "a"))
+	plain := opItem("item-plain", "Plain", onepass.Field{ID: "u", Type: "STRING", Label: "username", Value: "bob"})
+	r := runSync(t, Deps{Keychain: kc, OnePass: fakeOp(plain)})
+	want := `{"var":"ALPHA","account":"my.1password.com","status":"removed"}` + "\n" + trailerOK
+	if r.code != 0 || r.stdout != want || kc.Writes != 1 {
 		t.Fatalf("code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
+	}
+}
+
+func TestSyncZeroAccountsIsExit2(t *testing.T) {
+	kc := fakeBundle(t, sv("ALPHA", "a"))
+	r := runSync(t, Deps{Keychain: kc, OnePass: &onepass.Fake{}})
+	want := `{"error":"onepassword_unauthorized","detail":"sync aborted: 1Password could not be authorized: no 1Password accounts are signed in; keychain cache unchanged; unlock 1Password and rerun","hint":"op signin"}` + "\n"
+	if r.code != 2 || r.stdout != "" || r.stderr != want || kc.Writes != 0 {
+		t.Fatalf("code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
+	}
+}
+
+func TestSyncOpTimeoutIsExit2(t *testing.T) {
+	kc := fakeBundle(t, sv("ALPHA", "a"))
+	op := fakeOp(varItem("ALPHA", "a"))
+	op.Errs.ListTagged = &onepass.AuthError{Account: acct1, Detail: "op timed out after 60s; a Touch ID or unlock prompt was probably unanswered", Err: onepass.ErrTimeout}
+	r := runSync(t, Deps{Keychain: kc, OnePass: op})
+	want := `{"error":"onepassword_unauthorized","detail":"sync aborted: account my.1password.com could not be authorized: op timed out after 60s; a Touch ID or unlock prompt was probably unanswered; keychain cache unchanged; unlock 1Password and rerun","hint":"op signin --account my.1password.com"}` + "\n"
+	if r.code != 2 || r.stdout != "" || r.stderr != want || kc.Writes != 0 {
+		t.Fatalf("code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
+	}
+}
+
+// TestSyncBlankListOutputOnSecondAccountAbortsWithoutWrite drives the real
+// onepass client with a scripted runner: account A lists and fetches fine,
+// account B's `op item list` prints nothing. That must be a failure, not an
+// empty account, or sync would silently drop B's vars from the bundle.
+func TestSyncBlankListOutputOnSecondAccountAbortsWithoutWrite(t *testing.T) {
+	kc := fakeBundle(t, sv("ALPHA", "a"), bundle.Var{
+		Name: "BETA", Value: marker + "-b", AccountUUID: "ACCT2", UserUUID: "USER2", AccountURL: "other.1password.com", ItemID: "item-beta", FieldID: "field-beta",
+	})
+	mustJSON := func(v any) []byte {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	accounts := mustJSON([]onepass.Account{acct1, acct2})
+	listA := mustJSON([]onepass.Item{{ID: "item-alpha", Title: "Title ALPHA", Tags: []string{"shell-env"}}})
+	getA := mustJSON(varItem("ALPHA", "a"))
+	runner := func(_ context.Context, _ string, args ...string) ([]byte, []byte, int, error) {
+		switch {
+		case args[0] == "account":
+			return accounts, nil, 0, nil
+		case args[0] == "item" && args[1] == "list" && args[len(args)-1] == acct1.AccountUUID:
+			return listA, nil, 0, nil
+		case args[0] == "item" && args[1] == "list":
+			return []byte("\n"), nil, 0, nil
+		case args[0] == "item" && args[1] == "get":
+			return getA, nil, 0, nil
+		}
+		t.Fatalf("unexpected op args %q", args)
+		return nil, nil, 1, nil
+	}
+	op := onepass.New(onepass.Options{Runner: runner})
+	r := runSync(t, Deps{Keychain: kc, OnePass: op})
+	if r.code != 1 || r.stdout != "" || kc.Writes != 0 {
+		t.Fatalf("code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
+	}
+	for _, s := range []string{`"error":"onepassword_failed"`, "account other.1password.com", "malformed output", "keychain cache unchanged"} {
+		if !strings.Contains(r.stderr, s) {
+			t.Errorf("stderr %q lacks %q", r.stderr, s)
+		}
 	}
 }
 
@@ -396,9 +583,12 @@ func TestSyncKeychainReadError(t *testing.T) {
 
 func TestSyncTagFlagReachesListTagged(t *testing.T) {
 	kc := &keychain.Fake{}
-	op := fakeOp(varItem("ALPHA", "a"))
+	other := varItem("BETA", "b")
+	other.Tags = []string{"other"}
+	op := fakeOp(varItem("ALPHA", "a"), other)
 	r := runSync(t, Deps{Keychain: kc, OnePass: op}, "--tag", "other")
-	if r.code != 0 || r.stdout != trailerOK {
+	want := `{"var":"BETA","account":"my.1password.com","status":"added"}` + "\n" + trailerOK
+	if r.code != 0 || r.stdout != want {
 		t.Fatalf("code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
 	}
 	found := false

@@ -37,6 +37,7 @@ var ErrNotFound = errors.New("keychain item not found")
 // never contains the item value.
 type UnavailableError struct {
 	Detail string
+	err    error
 }
 
 func (e *UnavailableError) Error() string {
@@ -45,6 +46,10 @@ func (e *UnavailableError) Error() string {
 	}
 	return "keychain unavailable: " + e.Detail
 }
+
+// Unwrap exposes the cause (context.DeadlineExceeded on timeout) for
+// errors.Is; the cause never appears in Error.
+func (e *UnavailableError) Unwrap() error { return e.err }
 
 // Runner executes name with args and returns its output, exit code, and any
 // error starting or waiting on the process. On a context deadline exec reports
@@ -121,7 +126,12 @@ func (s *store) Read(ctx context.Context) ([]byte, error) {
 		s.opts.KeychainPath,
 	)
 	if err != nil {
-		return nil, err
+		// find-generic-password has no value in argv, so the runner's own text
+		// is safe to show.
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, &UnavailableError{Detail: fmt.Sprintf("security timed out after %s", s.opts.Timeout), err: err}
+		}
+		return nil, &UnavailableError{Detail: err.Error(), err: err}
 	}
 	if code == exitNotFound || bytes.Contains(stderr, []byte("could not be found")) {
 		return nil, ErrNotFound
@@ -138,8 +148,11 @@ func (s *store) Write(ctx context.Context, value []byte) error {
 		return err
 	}
 	// The value lands in argv for the lifetime of the security process. This is
-	// the one accepted exposure; see CLAUDE.md "Design constraints".
-	_, stderr, code, err := s.run(ctx,
+	// the one accepted exposure; see CLAUDE.md "Design constraints". Because a
+	// wrapper around security could echo that argv, no failure here carries
+	// stderr or the runner error: only the exit code or a fixed phrase.
+	const what = "security add-generic-password"
+	_, _, code, err := s.run(ctx,
 		"add-generic-password",
 		"-a", s.opts.Account,
 		"-s", s.opts.Service,
@@ -149,10 +162,13 @@ func (s *store) Write(ctx context.Context, value []byte) error {
 		s.opts.KeychainPath,
 	)
 	if err != nil {
-		return err
+		if errors.Is(err, context.DeadlineExceeded) {
+			return &UnavailableError{Detail: fmt.Sprintf("%s timed out after %s", what, s.opts.Timeout), err: err}
+		}
+		return &UnavailableError{Detail: what + " could not run"}
 	}
 	if code != 0 {
-		return unavailable(stderr, code)
+		return &UnavailableError{Detail: fmt.Sprintf("%s exited %d", what, code)}
 	}
 	return nil
 }
@@ -167,21 +183,20 @@ func (s *store) checkKeychainFile() error {
 }
 
 // run invokes security under the configured timeout. A non-nil error means the
-// process could not be run to completion; a nonzero code means it ran and
-// failed, and the caller decides what that means.
+// process could not be run to completion: the context error (which is
+// context.DeadlineExceeded on timeout) or the runner's own error, raw. The
+// caller classifies it and decides what text is safe to show, because on the
+// Write path argv holds the value. A nonzero code means it ran and failed.
 func (s *store) run(ctx context.Context, args ...string) (stdout, stderr []byte, code int, err error) {
 	ctx, cancel := context.WithTimeout(ctx, s.opts.Timeout)
 	defer cancel()
 
 	stdout, stderr, code, err = s.opts.Run(ctx, s.opts.SecurityPath, args...)
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		if errors.Is(ctxErr, context.DeadlineExceeded) {
-			return nil, nil, code, &UnavailableError{Detail: fmt.Sprintf("security timed out after %s", s.opts.Timeout)}
-		}
-		return nil, nil, code, &UnavailableError{Detail: ctxErr.Error()}
+		return nil, nil, code, ctxErr
 	}
 	if err != nil {
-		return nil, nil, code, &UnavailableError{Detail: err.Error()}
+		return nil, nil, code, err
 	}
 	return stdout, stderr, code, nil
 }
@@ -204,9 +219,13 @@ func errString(err error) string {
 	return err.Error()
 }
 
-// execRunner is the default Runner.
+// execRunner is the default Runner. Stdin is closed so a prompting security
+// cannot wait on a TTY; WaitDelay bounds the wait for pipes a killed process
+// leaves open.
 func execRunner(ctx context.Context, name string, args ...string) ([]byte, []byte, int, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdin = nil
+	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

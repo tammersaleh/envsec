@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/tammersaleh/envsec/internal/bundle"
@@ -37,28 +38,32 @@ func (EnvCmd) Run(rc *runContext) error {
 		inBundle[v.Name] = true
 		validName := export.LabelPattern.MatchString(v.Name)
 		reason := ""
+		quoted := ""
 		switch {
 		case !validName:
 			reason = "invalid name"
 		case export.Denied(v.Name):
 			reason = "denylisted"
 		default:
-			if _, qerr := export.Quote(v.Value); qerr != nil {
+			var qerr error
+			if quoted, qerr = export.Quote(v.Value); qerr != nil {
 				reason = qerr.Error()
 			}
 		}
 		if reason != "" {
-			rejected = append(rejected, fmt.Sprintf("%s (%s)", v.Name, reason))
+			// An invalid name may hold anything, so it is rendered as an
+			// ASCII-only Go literal to keep the warning on one line.
+			shown := v.Name
+			if !validName {
+				shown = strconv.QuoteToASCII(v.Name)
+			}
+			rejected = append(rejected, fmt.Sprintf("%s (%s)", shown, reason))
 			if validName {
 				fmt.Fprintln(&body, export.UnsetLine(v.Name))
 			}
 			continue
 		}
-		line, lerr := export.ExportLine(v.Name, v.Value)
-		if lerr != nil {
-			return lerr
-		}
-		fmt.Fprintln(&body, line)
+		fmt.Fprintln(&body, export.Line(v.Name, quoted))
 		exported = append(exported, v.Name)
 	}
 

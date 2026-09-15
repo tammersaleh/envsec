@@ -13,14 +13,16 @@ import (
 // SPEC.md "envsec sync" and "Hardening rules for sync". Everything resolves
 // before the single keychain write; any failure leaves the bundle untouched.
 type SyncCmd struct {
-	ForgetAccount []string `name:"forget-account" help:"Account UUID whose vars may be dropped because it left op account list. Repeatable." placeholder:"UUID"`
-	PruneAll      bool     `help:"Allow writing an empty bundle when 1Password yields no vars."`
+	ForgetAccount []string `name:"forget-account" help:"Account UUID whose vars may be dropped because it left op account list. Forgets every user under it. Repeatable." placeholder:"UUID"`
+	PruneAll      bool     `help:"Allow writing an empty bundle when no item carries the tag in any account."`
 }
 
 // statusRow is one line of sync or check output. Never carries a value.
+// Account is always present: the var's account URL, or empty on a conflict
+// row, which may span accounts.
 type statusRow struct {
 	Var     string `json:"var"`
-	Account string `json:"account,omitempty"`
+	Account string `json:"account"`
 	Status  string `json:"status"`
 	Detail  string `json:"detail,omitempty"`
 }
@@ -39,7 +41,11 @@ func (c SyncCmd) Run(rc *runContext) error {
 	out := jsonl{rc.stdout}
 	if len(res.Problems) > 0 {
 		for _, p := range res.Problems {
-			if err := out.Row(statusRow{Var: p.Var, Status: "error", Detail: p.Detail}); err != nil {
+			status := "error"
+			if p.Conflict {
+				status = "conflict"
+			}
+			if err := out.Row(statusRow{Var: p.Var, Account: p.AccountURL, Status: status, Detail: p.Detail}); err != nil {
 				return err
 			}
 		}
@@ -58,11 +64,13 @@ func (c SyncCmd) Run(rc *runContext) error {
 	if err := c.guardVanishedAccounts(old, res); err != nil {
 		return err
 	}
-	if len(res.Vars) == 0 && len(old.Vars) > 0 && !c.PruneAll {
+	// Zero in-scope items anywhere usually means the wrong tag or account,
+	// so an empty bundle needs --prune-all always, first run included.
+	if res.InScopeItems == 0 && !c.PruneAll {
 		return &ExitError{
 			Code:   ExitFailure,
 			Err:    "prune_refused",
-			Detail: fmt.Sprintf("1Password yielded no vars but the keychain bundle holds %d; refusing to empty it", len(old.Vars)),
+			Detail: fmt.Sprintf("no items tagged %q in any account; the keychain bundle holds %d var(s); refusing to write an empty bundle", rc.globals.Tag, len(old.Vars)),
 			Hint:   "envsec sync --prune-all",
 		}
 	}
@@ -90,23 +98,24 @@ func (c SyncCmd) Run(rc *runContext) error {
 	return out.Meta(Meta{ErrorCount: &zero})
 }
 
-// guardVanishedAccounts refuses to drop an account that is in the old bundle
-// but no longer in op account list unless --forget-account names it.
+// guardVanishedAccounts refuses to drop an identity (account UUID plus user
+// UUID) that is in the old bundle but no longer in op account list unless
+// --forget-account names its account UUID, which forgets every user under it.
 func (c SyncCmd) guardVanishedAccounts(old bundle.Bundle, res resolution) error {
-	present := map[string]bool{}
+	type identity struct{ account, user string }
+	present := map[identity]bool{}
 	for _, a := range res.Accounts {
-		present[a.AccountUUID] = true
+		present[identity{a.AccountUUID, a.UserUUID}] = true
 	}
-	seen := map[string]bool{}
 	for _, v := range old.Vars {
-		if present[v.AccountUUID] || seen[v.AccountUUID] || slices.Contains(c.ForgetAccount, v.AccountUUID) {
+		id := identity{v.AccountUUID, v.UserUUID}
+		if present[id] || slices.Contains(c.ForgetAccount, v.AccountUUID) {
 			continue
 		}
-		seen[v.AccountUUID] = true
 		return &ExitError{
 			Code:   ExitFailure,
 			Err:    "account_missing",
-			Detail: fmt.Sprintf("account %s (%s) is in the keychain bundle but not in op account list", v.AccountUUID, v.AccountURL),
+			Detail: fmt.Sprintf("account %s user %s (%s) is in the keychain bundle but not in op account list", v.AccountUUID, v.UserUUID, v.AccountURL),
 			Hint:   "envsec sync --forget-account " + v.AccountUUID,
 		}
 	}

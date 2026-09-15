@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -85,8 +86,6 @@ func TestListTagged(t *testing.T) {
 			},
 		},
 		{name: "empty array", stdout: fixture(t, "item_list_empty.json"), want: []Item{}},
-		{name: "no output", stdout: nil, want: []Item{}},
-		{name: "whitespace only", stdout: []byte("\n"), want: []Item{}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -171,7 +170,10 @@ func TestAuthErrorClassification(t *testing.T) {
 		{"[ERROR] Touch ID authentication failed", true},
 		{"[ERROR] could not unlock account", true},
 		{"[ERROR] No accounts configured for use with 1Password CLI", true},
+		{"[ERROR] authentication required", true},
+		{"[ERROR] account is locked", true},
 		{"[ERROR] 2026/09/14 10:00:00 unknown flag: --bogus\nUsage: op item list", false},
+		{"[ERROR] 2026/09/14 10:00:00 error initializing client: connection refused", false},
 		{"", false},
 	}
 	for _, tt := range tests {
@@ -206,8 +208,8 @@ func TestAuthErrorClassification(t *testing.T) {
 			if strings.Contains(ce.Detail, "\n") {
 				t.Errorf("Detail spans lines: %q", ce.Detail)
 			}
-			if tt.stderr != "" && !strings.Contains(ce.Detail, "unknown flag") {
-				t.Errorf("Detail = %q, want first stderr line", ce.Detail)
+			if first, _, _ := strings.Cut(tt.stderr, "\n"); ce.Detail != first {
+				t.Errorf("Detail = %q, want first stderr line %q", ce.Detail, first)
 			}
 		})
 	}
@@ -240,6 +242,210 @@ func TestTimeout(t *testing.T) {
 	}
 	if time.Since(start) > 5*time.Second {
 		t.Error("timeout not applied")
+	}
+	// An unanswered prompt is indistinguishable from a lock: exit 2.
+	var ae *AuthError
+	if !errors.As(err, &ae) {
+		t.Fatalf("err = %v, want AuthError", err)
+	}
+	if want := "op timed out after 20ms; a Touch ID or unlock prompt was probably unanswered"; ae.Detail != want {
+		t.Errorf("Detail = %q, want %q", ae.Detail, want)
+	}
+}
+
+func TestTimeoutWithAuthMarkerKeepsStderrDetailForListCommands(t *testing.T) {
+	block := func(ctx context.Context, _ string, _ ...string) ([]byte, []byte, int, error) {
+		<-ctx.Done()
+		return nil, []byte("[ERROR] You are not currently signed in.\nmore\n"), -1, ctx.Err()
+	}
+	c := New(Options{Runner: block, Timeout: 20 * time.Millisecond})
+	for name, call := range map[string]func() error{
+		"account list": func() error { _, err := c.Accounts(context.Background()); return err },
+		"item list":    func() error { _, err := c.ListTagged(context.Background(), acct2, "shell-env"); return err },
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := call()
+			var ae *AuthError
+			if !errors.As(err, &ae) {
+				t.Fatalf("err = %v, want AuthError", err)
+			}
+			if ae.Detail != "[ERROR] You are not currently signed in." {
+				t.Errorf("Detail = %q", ae.Detail)
+			}
+			if !errors.Is(err, ErrTimeout) {
+				t.Error("timeout not reported through errors.Is")
+			}
+		})
+	}
+}
+
+func TestItemGetTimeoutNeverCarriesStderr(t *testing.T) {
+	const leak = "LEAKED-STDERR-TEXT"
+	block := func(ctx context.Context, _ string, _ ...string) ([]byte, []byte, int, error) {
+		<-ctx.Done()
+		return nil, []byte("[ERROR] You are not currently signed in. " + leak + "\n"), -1, ctx.Err()
+	}
+	c := New(Options{Runner: block, Timeout: 20 * time.Millisecond})
+	_, err := c.GetItem(context.Background(), acct1, "x")
+	var ae *AuthError
+	if !errors.As(err, &ae) || !errors.Is(err, ErrTimeout) {
+		t.Fatalf("err = %v, want AuthError wrapping ErrTimeout", err)
+	}
+	if want := "op timed out after 20ms; a Touch ID or unlock prompt was probably unanswered"; ae.Detail != want {
+		t.Errorf("Detail = %q, want %q", ae.Detail, want)
+	}
+	if strings.Contains(err.Error(), leak) {
+		t.Errorf("error carries item get stderr: %q", err.Error())
+	}
+}
+
+func TestItemGetAuthErrorHasFixedDetail(t *testing.T) {
+	const leak = "LEAKED-STDERR-TEXT"
+	run := &cannedRun{stderr: []byte("[ERROR] You are not currently signed in. " + leak + "\n"), exitCode: 1}
+	c := New(Options{Runner: run.run})
+	_, err := c.GetItem(context.Background(), acct1, "x")
+	var ae *AuthError
+	if !errors.As(err, &ae) {
+		t.Fatalf("err = %v, want AuthError", err)
+	}
+	if ae.Detail != "op item get exited 1 with an authorization error" || ae.Account != acct1 {
+		t.Errorf("AuthError = %+v", ae)
+	}
+	if strings.Contains(err.Error(), leak) {
+		t.Errorf("error carries item get stderr: %q", err.Error())
+	}
+}
+
+func TestItemGetRunnerErrorHasFixedText(t *testing.T) {
+	const leak = "LEAKED-RUNNER-TEXT"
+	run := &cannedRun{err: errors.New("wrapper: " + leak), exitCode: -1}
+	c := New(Options{Runner: run.run})
+	_, err := c.GetItem(context.Background(), acct1, "x")
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if strings.Contains(err.Error(), leak) {
+		t.Errorf("error carries runner text: %q", err.Error())
+	}
+	if want := "op item get could not run"; err.Error() != want {
+		t.Errorf("err = %q, want %q", err.Error(), want)
+	}
+}
+
+func TestItemGetParentCancelStillReported(t *testing.T) {
+	block := func(ctx context.Context, _ string, _ ...string) ([]byte, []byte, int, error) {
+		<-ctx.Done()
+		return nil, nil, -1, ctx.Err()
+	}
+	c := New(Options{Runner: block})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := c.GetItem(ctx, acct1, "x")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
+func TestAccountsEmptyIsAuthError(t *testing.T) {
+	for _, stdout := range []string{"[]", "[]\n"} {
+		run := &cannedRun{stdout: []byte(stdout)}
+		c := New(Options{Runner: run.run})
+		_, err := c.Accounts(context.Background())
+		var ae *AuthError
+		if !errors.As(err, &ae) {
+			t.Fatalf("stdout %q: err = %v, want AuthError", stdout, err)
+		}
+		if ae.Detail != "no 1Password accounts are signed in" || ae.Account != (Account{}) {
+			t.Errorf("AuthError = %+v", ae)
+		}
+	}
+}
+
+func TestDecodeRejectsBlankAndNull(t *testing.T) {
+	for _, stdout := range []string{"", "\n", "  \n", "null", "null\n"} {
+		run := &cannedRun{stdout: []byte(stdout)}
+		c := New(Options{Runner: run.run})
+		if _, err := c.Accounts(context.Background()); err == nil || !strings.Contains(err.Error(), "malformed output") {
+			t.Errorf("Accounts(%q): err = %v, want malformed output", stdout, err)
+		}
+		if _, err := c.ListTagged(context.Background(), acct1, "t"); err == nil || !strings.Contains(err.Error(), "malformed output") {
+			t.Errorf("ListTagged(%q): err = %v, want malformed output", stdout, err)
+		}
+		if _, err := c.GetItem(context.Background(), acct1, "x"); err == nil || !strings.Contains(err.Error(), "malformed output") {
+			t.Errorf("GetItem(%q): err = %v, want malformed output", stdout, err)
+		}
+	}
+}
+
+func TestAccountsValidation(t *testing.T) {
+	for name, stdout := range map[string]string{
+		"missing account_uuid": `[{"url":"my.1password.com","email":"u@example.com","user_uuid":"U1"}]`,
+		"empty user_uuid":      `[{"url":"my.1password.com","email":"u@example.com","user_uuid":"","account_uuid":"A1"}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := &cannedRun{stdout: []byte(stdout)}
+			c := New(Options{Runner: run.run})
+			_, err := c.Accounts(context.Background())
+			if err == nil {
+				t.Fatal("want error")
+			}
+			var ae *AuthError
+			if errors.As(err, &ae) {
+				t.Fatalf("validation failure classified as auth: %v", err)
+			}
+		})
+	}
+}
+
+func TestListTaggedRejectsEmptyID(t *testing.T) {
+	run := &cannedRun{stdout: []byte(`[{"id":"","title":"x","tags":["shell-env"]}]`)}
+	c := New(Options{Runner: run.run})
+	if _, err := c.ListTagged(context.Background(), acct1, "shell-env"); err == nil || !strings.Contains(err.Error(), "empty id") {
+		t.Fatalf("err = %v, want empty id", err)
+	}
+}
+
+func TestGetItemIDMismatch(t *testing.T) {
+	run := &cannedRun{stdout: fixture(t, "item_get.json")}
+	c := New(Options{Runner: run.run})
+	_, err := c.GetItem(context.Background(), acct1, "ITEMID0000000000000000000009")
+	if err == nil || !strings.Contains(err.Error(), "item id mismatch") {
+		t.Fatalf("err = %v, want item id mismatch", err)
+	}
+	run = &cannedRun{stdout: []byte(`{"title":"no id","fields":[]}`)}
+	c = New(Options{Runner: run.run})
+	if _, err := c.GetItem(context.Background(), acct1, "x"); err == nil || !strings.Contains(err.Error(), "item id mismatch") {
+		t.Fatalf("empty id: err = %v, want item id mismatch", err)
+	}
+}
+
+func TestGetItemNotFoundWinsOverAuthMarker(t *testing.T) {
+	run := &cannedRun{stderr: []byte(`[ERROR] "nope" isn't an item. unlock the vault and retry`), exitCode: 1}
+	c := New(Options{Runner: run.run})
+	_, err := c.GetItem(context.Background(), acct1, "nope")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	var ae *AuthError
+	if errors.As(err, &ae) {
+		t.Fatal("not-found classified as auth")
+	}
+}
+
+func TestGetItemCommandErrorRedactsStderr(t *testing.T) {
+	const leak = "LEAKED-STDERR-TEXT"
+	run := &cannedRun{stderr: []byte("[ERROR] boom " + leak + "\n"), exitCode: 3}
+	c := New(Options{Runner: run.run})
+	_, err := c.GetItem(context.Background(), acct1, "x")
+	var ce *CommandError
+	if !errors.As(err, &ce) {
+		t.Fatalf("err = %T %v, want CommandError", err, err)
+	}
+	if ce.Detail != "op item get exited 3" {
+		t.Errorf("Detail = %q", ce.Detail)
+	}
+	if strings.Contains(err.Error(), leak) {
+		t.Errorf("error carries item get stderr: %q", err.Error())
 	}
 }
 
@@ -292,13 +498,179 @@ func TestVerboseStderr(t *testing.T) {
 			t.Fatal(err)
 		}
 		if got := strings.Contains(buf.String(), "some warning"); got != verbose {
-			t.Errorf("verbose=%v: stderr forwarded=%v (%q)", verbose, got, buf.String())
+			t.Errorf("verbose=%v: account list stderr forwarded=%v (%q)", verbose, got, buf.String())
+		}
+
+		buf.Reset()
+		run = &cannedRun{stdout: fixture(t, "item_list.json"), stderr: []byte("op: list warning\n")}
+		c = New(Options{Runner: run.run, Verbose: verbose, Stderr: &buf})
+		if _, err := c.ListTagged(context.Background(), acct1, "shell-env"); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(buf.String(), "list warning"); got != verbose {
+			t.Errorf("verbose=%v: item list stderr forwarded=%v (%q)", verbose, got, buf.String())
 		}
 	}
 }
 
+func TestVerboseNeverForwardsItemGetStderr(t *testing.T) {
+	const leak = "LEAKED-STDERR-TEXT"
+	for name, run := range map[string]*cannedRun{
+		"success": {stdout: fixture(t, "item_get.json"), stderr: []byte("op: " + leak + "\n")},
+		"failure": {stderr: []byte("[ERROR] boom " + leak + "\n"), exitCode: 3},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var buf bytes.Buffer
+			c := New(Options{Runner: run.run, Verbose: true, Stderr: &buf})
+			_, _ = c.GetItem(context.Background(), acct1, "ITEMID0000000000000000000001")
+			if buf.Len() != 0 {
+				t.Errorf("item get stderr forwarded: %q", buf.String())
+			}
+		})
+	}
+}
+
+func TestDecodeRejectsInvalidUTF8(t *testing.T) {
+	bad := []byte("[{\"url\":\"my.1password.com\",\"email\":\"u\",\"user_uuid\":\"U\",\"account_uuid\":\"A\xff\"}]")
+	run := &cannedRun{stdout: bad}
+	c := New(Options{Runner: run.run})
+	if _, err := c.Accounts(context.Background()); err == nil || !strings.Contains(err.Error(), "malformed output") {
+		t.Errorf("Accounts: err = %v, want malformed output", err)
+	}
+	run = &cannedRun{stdout: []byte("{\"id\":\"x\",\"tags\":[],\"fields\":[{\"id\":\"f\",\"value\":\"\xff\"}]}")}
+	c = New(Options{Runner: run.run})
+	if _, err := c.GetItem(context.Background(), acct1, "x"); err == nil || !strings.Contains(err.Error(), "malformed output") {
+		t.Errorf("GetItem: err = %v, want malformed output", err)
+	}
+}
+
+func TestGetItemStrictShape(t *testing.T) {
+	cases := map[string]struct {
+		stdout string
+		want   string // substring of the error; empty means success
+	}{
+		"tags and fields empty arrays": {`{"id":"x","title":"t","tags":[],"fields":[]}`, ""},
+		"tags missing":                 {`{"id":"x","title":"t","fields":[]}`, "tags"},
+		"tags null":                    {`{"id":"x","title":"t","tags":null,"fields":[]}`, "tags"},
+		"fields missing":               {`{"id":"x","title":"t","tags":["shell-env"]}`, "fields"},
+		"fields null":                  {`{"id":"x","title":"t","tags":["shell-env"],"fields":null}`, "fields"},
+		"field with empty id":          {`{"id":"x","title":"t","tags":[],"fields":[{"id":"","type":"CONCEALED","label":"A","value":"v"}]}`, "empty id"},
+		"field without id":             {`{"id":"x","title":"t","tags":[],"fields":[{"type":"CONCEALED","label":"A","value":"v"}]}`, "empty id"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			run := &cannedRun{stdout: []byte(tc.stdout)}
+			c := New(Options{Runner: run.run})
+			item, err := c.GetItem(context.Background(), acct1, "x")
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("err = %v", err)
+				}
+				if item.Tags == nil || item.Fields == nil {
+					t.Fatalf("empty arrays decoded as nil: %+v", item)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want mention of %q", err, tc.want)
+			}
+			var ae *AuthError
+			if errors.As(err, &ae) {
+				t.Fatal("shape failure classified as auth")
+			}
+		})
+	}
+}
+
+func TestAccountsStrictShape(t *testing.T) {
+	one := `{"url":"my.1password.com","email":"u@example.com","user_uuid":"U1","account_uuid":"A1"}`
+	cases := map[string]string{
+		"empty url":          `[{"url":"","email":"u@example.com","user_uuid":"U1","account_uuid":"A1"}]`,
+		"missing url":        `[{"email":"u@example.com","user_uuid":"U1","account_uuid":"A1"}]`,
+		"duplicate identity": `[` + one + `,{"url":"other.1password.com","email":"u@example.com","user_uuid":"U1","account_uuid":"A1"}]`,
+	}
+	for name, stdout := range cases {
+		t.Run(name, func(t *testing.T) {
+			run := &cannedRun{stdout: []byte(stdout)}
+			c := New(Options{Runner: run.run})
+			_, err := c.Accounts(context.Background())
+			if err == nil {
+				t.Fatal("want error")
+			}
+			var ae *AuthError
+			if errors.As(err, &ae) {
+				t.Fatalf("shape failure classified as auth: %v", err)
+			}
+		})
+	}
+	// Same account UUID with two users is two identities, not a duplicate.
+	run := &cannedRun{stdout: []byte(`[` + one + `,{"url":"my.1password.com","email":"o@example.com","user_uuid":"U2","account_uuid":"A1"}]`)}
+	c := New(Options{Runner: run.run})
+	if got, err := c.Accounts(context.Background()); err != nil || len(got) != 2 {
+		t.Fatalf("two users under one account: got %d accounts, err %v", len(got), err)
+	}
+}
+
+func TestListTaggedRejectsDuplicateIDs(t *testing.T) {
+	run := &cannedRun{stdout: []byte(`[{"id":"x","title":"a","tags":["shell-env"]},{"id":"x","title":"b","tags":["shell-env"]}]`)}
+	c := New(Options{Runner: run.run})
+	if _, err := c.ListTagged(context.Background(), acct1, "shell-env"); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("err = %v, want duplicate", err)
+	}
+}
+
+// TestExecRunnerScrubsManagedVars re-executes the test binary as the child
+// (the GO_WANT_HELPER_PROCESS pattern) and reads back the environment the
+// default runner handed it: the sentinel and every valid name it lists are
+// gone, everything else survives.
+func TestExecRunnerScrubsManagedVars(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	t.Setenv("ENVSEC_MANAGED_VARS", "GRAFANA_TOKEN OTHER_TOKEN lower-case PATH")
+	t.Setenv("GRAFANA_TOKEN", "g")
+	t.Setenv("OTHER_TOKEN", "o")
+	t.Setenv("lower-case", "l")
+	t.Setenv("ENVSEC_KEEP_TEST", "k")
+	t.Setenv("UNRELATED_TOKEN", "u")
+	pathBefore := os.Getenv("PATH")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	stdout, stderr, code, err := execRunner(ctx, os.Args[0], "-test.run=^TestHelperProcess$", "--")
+	if err != nil || code != 0 {
+		t.Fatalf("helper: code=%d err=%v stderr=%s", code, err, stderr)
+	}
+	env := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(stdout)), "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok {
+			env[k] = v
+		}
+	}
+	for _, gone := range []string{"ENVSEC_MANAGED_VARS", "GRAFANA_TOKEN", "OTHER_TOKEN"} {
+		if v, ok := env[gone]; ok {
+			t.Errorf("%s reached the child (=%q)", gone, v)
+		}
+	}
+	for k, want := range map[string]string{"lower-case": "l", "ENVSEC_KEEP_TEST": "k", "UNRELATED_TOKEN": "u", "PATH": pathBefore} {
+		if got := env[k]; got != want {
+			t.Errorf("%s = %q in the child, want %q", k, got, want)
+		}
+	}
+}
+
+// TestHelperProcess is the child for TestExecRunnerScrubsManagedVars. It is
+// a no-op unless GO_WANT_HELPER_PROCESS is set.
+func TestHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	defer os.Exit(0)
+	for _, kv := range os.Environ() {
+		fmt.Println(kv)
+	}
+}
+
 func TestPathOption(t *testing.T) {
-	run := &cannedRun{stdout: []byte("[]")}
+	run := &cannedRun{stdout: fixture(t, "account_list.json")}
 	c := New(Options{Runner: run.run, Path: "/opt/bin/op"})
 	if _, err := c.Accounts(context.Background()); err != nil {
 		t.Fatal(err)

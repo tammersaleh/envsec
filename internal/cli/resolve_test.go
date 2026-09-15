@@ -19,8 +19,8 @@ func TestResolveWalksEveryAccountBeforeReturning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Accounts) != 2 || len(res.Vars) != 3 {
-		t.Fatalf("accounts=%d vars=%d", len(res.Accounts), len(res.Vars))
+	if len(res.Accounts) != 2 || len(res.Vars) != 3 || res.InScopeItems != 3 {
+		t.Fatalf("accounts=%d vars=%d items=%d", len(res.Accounts), len(res.Vars), res.InScopeItems)
 	}
 	if len(res.Problems) != 1 || !res.Problems[0].Conflict || res.Problems[0].Var != "TOKEN" {
 		t.Fatalf("problems = %+v", res.Problems)
@@ -49,22 +49,56 @@ func TestResolveWalksEveryAccountBeforeReturning(t *testing.T) {
 	}
 }
 
-func TestResolveSelectionProblemsHaveNoVar(t *testing.T) {
+func TestResolveSelectionProblemsNameTheLabel(t *testing.T) {
 	res, err := resolve(newRC(fakeOp(varItem("PATH", "p")), "shell-env"), "sync")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Problems) != 1 || res.Problems[0].Var != "" || res.Problems[0].Conflict {
+	if len(res.Problems) != 1 || res.Problems[0].Var != "PATH" || res.Problems[0].Conflict {
 		t.Fatalf("problems = %+v", res.Problems)
+	}
+	if res.InScopeItems != 1 {
+		t.Fatalf("an item that yields only errors is still in scope: %d", res.InScopeItems)
 	}
 }
 
-func TestConflictVar(t *testing.T) {
-	if got := conflictVar(errors.New("conflict: TOKEN is defined by item a (x) and item b (y)")); got != "TOKEN" {
-		t.Fatalf("got %q", got)
+func TestResolveCountsTaggedItemsWithNoExportableFields(t *testing.T) {
+	plain := opItem("item-plain", "Plain", onepass.Field{ID: "u", Type: "STRING", Label: "username", Value: "bob"})
+	res, err := resolve(newRC(fakeOp(plain), "shell-env"), "sync")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := conflictVar(errors.New("something else")); got != "" {
-		t.Fatalf("got %q", got)
+	if res.InScopeItems != 1 || len(res.Vars) != 0 || len(res.Problems) != 0 {
+		t.Fatalf("res = %+v", res)
+	}
+}
+
+func TestResolveUntaggedFetchIsNotInScope(t *testing.T) {
+	// The summary carried the tag; the fetched item does not.
+	untagged := opItem("item-u", "U", secret("U", "u"))
+	untagged.Tags = nil
+	fake := fakeOp(untagged)
+	op := &wrapClient{Fake: fake}
+	op.listTagged = func(context.Context, onepass.Account, string) ([]onepass.Item, error) {
+		s := untagged
+		s.Tags = []string{"shell-env"}
+		s.Fields = nil
+		return []onepass.Item{s}, nil
+	}
+	res, err := resolve(newRC(op, "shell-env"), "sync")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.InScopeItems != 0 || len(res.Vars) != 0 {
+		t.Fatalf("res = %+v", res)
+	}
+}
+
+func TestResolveZeroAccountsIsAuthFailure(t *testing.T) {
+	_, err := resolve(newRC(&onepass.Fake{}, "shell-env"), "check")
+	var ee *ExitError
+	if !errors.As(err, &ee) || ee.Code != ExitOnePassAuth || ee.Err != "onepassword_unauthorized" {
+		t.Fatalf("err = %v", err)
 	}
 }
 
@@ -81,11 +115,17 @@ func TestOpFatal(t *testing.T) {
 		{
 			name: "auth without account", err: &onepass.AuthError{Detail: "locked"},
 			wantCode: 2, wantErr: "onepassword_unauthorized",
-			wantDetail: "check aborted: 1Password could not be authorized; keychain cache unchanged; unlock 1Password and rerun",
+			wantDetail: "check aborted: 1Password could not be authorized: locked; keychain cache unchanged; unlock 1Password and rerun",
 			wantHint:   "op signin",
 		},
 		{
 			name: "auth with account from call", err: &onepass.AuthError{Detail: "locked"}, acct: acct1,
+			wantCode: 2, wantErr: "onepassword_unauthorized",
+			wantDetail: "check aborted: account my.1password.com could not be authorized: locked; keychain cache unchanged; unlock 1Password and rerun",
+			wantHint:   "op signin --account my.1password.com",
+		},
+		{
+			name: "auth with empty detail", err: &onepass.AuthError{}, acct: acct1,
 			wantCode: 2, wantErr: "onepassword_unauthorized",
 			wantDetail: "check aborted: account my.1password.com could not be authorized; keychain cache unchanged; unlock 1Password and rerun",
 			wantHint:   "op signin --account my.1password.com",
@@ -97,10 +137,10 @@ func TestOpFatal(t *testing.T) {
 			wantHint:   "fix the 1Password error and rerun envsec check",
 		},
 		{
-			name: "timeout", err: onepass.ErrTimeout, acct: acct1,
-			wantCode: 1, wantErr: "onepassword_failed",
-			wantDetail: "check aborted: account my.1password.com: get item x: op: command timed out; keychain cache unchanged",
-			wantHint:   "fix the 1Password error and rerun envsec check",
+			name: "timeout is an auth failure", err: &onepass.AuthError{Account: acct1, Detail: "op timed out after 1s; a Touch ID or unlock prompt was probably unanswered", Err: onepass.ErrTimeout}, acct: acct1,
+			wantCode: 2, wantErr: "onepassword_unauthorized",
+			wantDetail: "check aborted: account my.1password.com could not be authorized: op timed out after 1s; a Touch ID or unlock prompt was probably unanswered; keychain cache unchanged; unlock 1Password and rerun",
+			wantHint:   "op signin --account my.1password.com",
 		},
 	}
 	for _, tc := range cases {

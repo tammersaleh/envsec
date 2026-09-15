@@ -74,12 +74,16 @@ var (
 	ErrNotFound = errors.New("op: item not found")
 )
 
-// AuthError means `op` could not authorize: locked, signed out, or a dismissed
-// Touch ID prompt. Callers map it to exit code 2. Account is the zero value
-// when the failing command was not account-scoped.
+// AuthError means `op` could not authorize: locked, signed out, a dismissed
+// Touch ID prompt, no signed-in accounts, or a command that hit its timeout
+// (an unanswered prompt is indistinguishable from a lock). Callers map it to
+// exit code 2. Account is the zero value when the failing command was not
+// account-scoped. Err, when set, is the underlying cause (ErrTimeout) and is
+// exposed through Unwrap.
 type AuthError struct {
 	Account Account
 	Detail  string
+	Err     error
 }
 
 func (e *AuthError) Error() string {
@@ -89,8 +93,12 @@ func (e *AuthError) Error() string {
 	return fmt.Sprintf("op: not authorized for %s: %s", e.Account.URL, e.Detail)
 }
 
+func (e *AuthError) Unwrap() error { return e.Err }
+
 // CommandError is any other nonzero exit from `op`. Detail is the first line
-// of stderr.
+// of stderr for `account list` and `item list`. For `item get` stderr is
+// never carried because the item is fetched with --reveal; there Detail is
+// "op item get exited N". AuthError.Detail follows the same rule.
 type CommandError struct {
 	Args     []string
 	ExitCode int

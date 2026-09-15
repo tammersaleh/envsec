@@ -3,7 +3,6 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/tammersaleh/envsec/internal/bundle"
 	"github.com/tammersaleh/envsec/internal/export"
@@ -11,12 +10,14 @@ import (
 )
 
 // problem is a non-fatal resolve failure: a field that could not be selected
-// or a var yielded by more than one item. Var is empty when the source error
-// does not expose the name (export.Select errors carry it in the text only).
+// or a var yielded by more than one source. Var is the label or var name.
+// AccountURL is the item's account for a selection failure and empty for a
+// conflict, which may span accounts.
 type problem struct {
-	Var      string
-	Conflict bool
-	Detail   string
+	Var        string
+	AccountURL string
+	Conflict   bool
+	Detail     string
 }
 
 // resolution is everything sync and check learn from 1Password.
@@ -24,6 +25,11 @@ type resolution struct {
 	Vars     []bundle.Var
 	Accounts []onepass.Account
 	Problems []problem
+	// InScopeItems counts items that were fetched and still carry the tag,
+	// whether or not they yield vars. Zero means the tag search found
+	// nothing anywhere; sync refuses to write an empty bundle on that
+	// without --prune-all.
+	InScopeItems int
 }
 
 // resolve lists every account, fetches every item tagged rc.globals.Tag, and
@@ -43,6 +49,11 @@ func resolve(rc *runContext, cmd string) (resolution, error) {
 	if err != nil {
 		return res, opFatal(cmd, err, onepass.Account{}, "list accounts")
 	}
+	if len(accounts) == 0 {
+		// The real client already reports this; the check here keeps the
+		// contract when the client is swapped.
+		return res, opFatal(cmd, &onepass.AuthError{Detail: "no 1Password accounts are signed in"}, onepass.Account{}, "list accounts")
+	}
 	res.Accounts = accounts
 
 	for _, acct := range accounts {
@@ -59,16 +70,17 @@ func resolve(rc *runContext, cmd string) (resolution, error) {
 			if !onepass.HasTag(item, tag) {
 				continue
 			}
+			res.InScopeItems++
 			vars, errs := export.Select(toExportItem(item, acct))
 			res.Vars = append(res.Vars, vars...)
 			for _, e := range errs {
-				res.Problems = append(res.Problems, problem{Detail: e.Error()})
+				res.Problems = append(res.Problems, problem{Var: e.Label, AccountURL: acct.URL, Detail: e.Error()})
 			}
 		}
 	}
 
 	for _, e := range export.DetectConflicts(res.Vars) {
-		res.Problems = append(res.Problems, problem{Var: conflictVar(e), Conflict: true, Detail: e.Error()})
+		res.Problems = append(res.Problems, problem{Var: e.Name, Conflict: true, Detail: e.Error()})
 	}
 	return res, nil
 }
@@ -90,18 +102,6 @@ func toExportItem(item onepass.Item, acct onepass.Account) export.Item {
 	}
 }
 
-// conflictVar pulls the var name out of an export.DetectConflicts error,
-// whose text is "conflict: NAME is defined by ...". Empty if the shape is
-// not recognized.
-func conflictVar(err error) string {
-	rest, ok := strings.CutPrefix(err.Error(), "conflict: ")
-	if !ok {
-		return ""
-	}
-	name, _, _ := strings.Cut(rest, " ")
-	return name
-}
-
 // opFatal maps an op failure to the fatal *ExitError for cmd. what says which
 // call failed; acct is the zero value for account-less calls.
 func opFatal(cmd string, err error, acct onepass.Account, what string) error {
@@ -116,10 +116,14 @@ func opFatal(cmd string, err error, acct onepass.Account, what string) error {
 			who = "account " + ae.Account.URL
 			hint = "op signin --account " + ae.Account.URL
 		}
+		why := ""
+		if ae.Detail != "" {
+			why = ": " + ae.Detail
+		}
 		return &ExitError{
 			Code:   ExitOnePassAuth,
 			Err:    "onepassword_unauthorized",
-			Detail: fmt.Sprintf("%s aborted: %s could not be authorized; keychain cache unchanged; unlock 1Password and rerun", cmd, who),
+			Detail: fmt.Sprintf("%s aborted: %s could not be authorized%s; keychain cache unchanged; unlock 1Password and rerun", cmd, who, why),
 			Hint:   hint,
 		}
 	}

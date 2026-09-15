@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"os"
@@ -90,9 +91,9 @@ func TestHelpExitsZero(t *testing.T) {
 
 func TestEnvHappyPath(t *testing.T) {
 	r := runCLI(t, Deps{Keychain: fakeBundle(t, v("ZED", "z"), v("ALPHA", "it's $x `y`"))}, "env")
-	want := "builtin export -- ALPHA='it'\\''s $x `y`'\n" +
-		"builtin export -- ZED='z'\n" +
-		"builtin export -- ENVSEC_MANAGED_VARS='ALPHA ZED'\n"
+	want := "[[ ${(t)ALPHA} != *readonly* ]] && builtin unset -- ALPHA && builtin export -- ALPHA='it'\\''s $x `y`'\n" +
+		"[[ ${(t)ZED} != *readonly* ]] && builtin unset -- ZED && builtin export -- ZED='z'\n" +
+		"[[ ${(t)ENVSEC_MANAGED_VARS} != *readonly* ]] && builtin unset -- ENVSEC_MANAGED_VARS && builtin export -- ENVSEC_MANAGED_VARS='ALPHA ZED'\n"
 	if r.stdout != want {
 		t.Fatalf("stdout = %q\nwant     %q", r.stdout, want)
 	}
@@ -109,9 +110,9 @@ func TestEnvStaleSentinel(t *testing.T) {
 		return ""
 	}
 	r := runCLI(t, Deps{Keychain: fakeBundle(t, v("ALPHA", "a")), Env: env}, "env")
-	want := "unset STALE\n" +
-		"builtin export -- ALPHA='a'\n" +
-		"builtin export -- ENVSEC_MANAGED_VARS='ALPHA'\n"
+	want := "[[ ${(t)STALE} != *readonly* ]] && builtin unset -- STALE\n" +
+		"[[ ${(t)ALPHA} != *readonly* ]] && builtin unset -- ALPHA && builtin export -- ALPHA='a'\n" +
+		"[[ ${(t)ENVSEC_MANAGED_VARS} != *readonly* ]] && builtin unset -- ENVSEC_MANAGED_VARS && builtin export -- ENVSEC_MANAGED_VARS='ALPHA'\n"
 	if r.stdout != want || r.code != 0 {
 		t.Fatalf("code=%d stdout = %q\nwant %q", r.code, r.stdout, want)
 	}
@@ -125,7 +126,7 @@ func TestEnvEmptyBundleClearsSentinel(t *testing.T) {
 		return ""
 	}
 	r := runCLI(t, Deps{Keychain: fakeBundle(t), Env: env}, "env")
-	want := "unset OLD\nbuiltin export -- ENVSEC_MANAGED_VARS=''\n"
+	want := "[[ ${(t)OLD} != *readonly* ]] && builtin unset -- OLD\n[[ ${(t)ENVSEC_MANAGED_VARS} != *readonly* ]] && builtin unset -- ENVSEC_MANAGED_VARS && builtin export -- ENVSEC_MANAGED_VARS=''\n"
 	if r.stdout != want || r.code != 0 {
 		t.Fatalf("code=%d stdout = %q", r.code, r.stdout)
 	}
@@ -133,9 +134,9 @@ func TestEnvEmptyBundleClearsSentinel(t *testing.T) {
 
 func TestEnvRejectsBadValue(t *testing.T) {
 	r := runCLI(t, Deps{Keychain: fakeBundle(t, v("BAD", "a\nb"), v("GOOD", "g"))}, "env")
-	want := "unset BAD\n" +
-		"builtin export -- GOOD='g'\n" +
-		"builtin export -- ENVSEC_MANAGED_VARS='GOOD'\n"
+	want := "[[ ${(t)BAD} != *readonly* ]] && builtin unset -- BAD\n" +
+		"[[ ${(t)GOOD} != *readonly* ]] && builtin unset -- GOOD && builtin export -- GOOD='g'\n" +
+		"[[ ${(t)ENVSEC_MANAGED_VARS} != *readonly* ]] && builtin unset -- ENVSEC_MANAGED_VARS && builtin export -- ENVSEC_MANAGED_VARS='GOOD'\n"
 	if r.stdout != want {
 		t.Fatalf("stdout = %q\nwant %q", r.stdout, want)
 	}
@@ -152,10 +153,10 @@ func TestEnvRejectsBadValue(t *testing.T) {
 
 func TestEnvRejectsDenylisted(t *testing.T) {
 	r := runCLI(t, Deps{Keychain: fakeBundle(t, v("PATH", "/evil"), v("LC_ALL", "C"), v("OK", "1"))}, "env")
-	want := "unset LC_ALL\n" +
-		"builtin export -- OK='1'\n" +
-		"unset PATH\n" +
-		"builtin export -- ENVSEC_MANAGED_VARS='OK'\n"
+	want := "[[ ${(t)LC_ALL} != *readonly* ]] && builtin unset -- LC_ALL\n" +
+		"[[ ${(t)OK} != *readonly* ]] && builtin unset -- OK && builtin export -- OK='1'\n" +
+		"[[ ${(t)PATH} != *readonly* ]] && builtin unset -- PATH\n" +
+		"[[ ${(t)ENVSEC_MANAGED_VARS} != *readonly* ]] && builtin unset -- ENVSEC_MANAGED_VARS && builtin export -- ENVSEC_MANAGED_VARS='OK'\n"
 	if r.stdout != want {
 		t.Fatalf("stdout = %q\nwant %q", r.stdout, want)
 	}
@@ -166,12 +167,26 @@ func TestEnvRejectsDenylisted(t *testing.T) {
 
 func TestEnvRejectsInvalidNameWithoutUnset(t *testing.T) {
 	r := runCLI(t, Deps{Keychain: fakeBundle(t, v("bad name", "x"), v("OK", "1"))}, "env")
-	want := "builtin export -- OK='1'\nbuiltin export -- ENVSEC_MANAGED_VARS='OK'\n"
+	want := "[[ ${(t)OK} != *readonly* ]] && builtin unset -- OK && builtin export -- OK='1'\n[[ ${(t)ENVSEC_MANAGED_VARS} != *readonly* ]] && builtin unset -- ENVSEC_MANAGED_VARS && builtin export -- ENVSEC_MANAGED_VARS='OK'\n"
 	if r.stdout != want || r.code != 1 {
 		t.Fatalf("code=%d stdout = %q", r.code, r.stdout)
 	}
-	if r.stderr != "envsec: rejected 1 var(s): bad name (invalid name)\n" {
+	if r.stderr != "envsec: rejected 1 var(s): \"bad name\" (invalid name)\n" {
 		t.Fatalf("stderr = %q", r.stderr)
+	}
+}
+
+func TestEnvInvalidNameWarningStaysOneLine(t *testing.T) {
+	r := runCLI(t, Deps{Keychain: fakeBundle(t, v("bad\nname\x1b[0m", "x"), v("OK", "1"))}, "env")
+	if r.code != 1 || r.stdout != "[[ ${(t)OK} != *readonly* ]] && builtin unset -- OK && builtin export -- OK='1'\n[[ ${(t)ENVSEC_MANAGED_VARS} != *readonly* ]] && builtin unset -- ENVSEC_MANAGED_VARS && builtin export -- ENVSEC_MANAGED_VARS='OK'\n" {
+		t.Fatalf("code=%d stdout=%q", r.code, r.stdout)
+	}
+	want := "envsec: rejected 1 var(s): \"bad\\nname\\x1b[0m\" (invalid name)\n"
+	if r.stderr != want {
+		t.Fatalf("stderr = %q\nwant %q", r.stderr, want)
+	}
+	if strings.Count(r.stderr, "\n") != 1 || strings.Contains(r.stderr, "\x1b") {
+		t.Fatalf("warning is not one clean physical line: %q", r.stderr)
 	}
 }
 
@@ -184,7 +199,8 @@ func TestEnvUnreadableBundle(t *testing.T) {
 		"missing item":   {&keychain.Fake{}, "envsec: no envsec bundle in the keychain; run envsec sync\n"},
 		"unavailable":    {&keychain.Fake{ReadErr: &keychain.UnavailableError{Detail: "locked"}}, "envsec: keychain unavailable: locked; run envsec sync\n"},
 		"bad base64":     {&keychain.Fake{Exists: true, Value: []byte("!!!")}, "envsec: bundle is not valid base64: illegal base64 data at input byte 0; run envsec sync\n"},
-		"bad json":       {&keychain.Fake{Exists: true, Value: []byte(base64.StdEncoding.EncodeToString([]byte("{")))}, ""},
+		"bad json":       {&keychain.Fake{Exists: true, Value: []byte(base64.StdEncoding.EncodeToString([]byte("{")))}, "envsec: bundle is not valid JSON: unmarshal failed; run envsec sync\n"},
+		"no vars":        {&keychain.Fake{Exists: true, Value: []byte(base64.StdEncoding.EncodeToString([]byte(`{"schema":1,"generated_at":"2026-09-14T17:02:11Z"}`)))}, "envsec: bundle is not valid JSON: missing vars; run envsec sync\n"},
 		"unknown schema": {&keychain.Fake{Exists: true, Value: badSchema}, "envsec: bundle schema is not supported: got 99, want 1; run envsec sync\n"},
 	}
 	for name, tc := range cases {
@@ -236,14 +252,57 @@ func TestEnvZshRoundTrip(t *testing.T) {
 	if err := os.WriteFile(script, []byte(r.stdout), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("/bin/zsh", "-f", "-c",
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/zsh", "-f", "-c",
 		`eval "$(cat "$1")"; printf '%s\n' "$TRICKY" "$PLAIN" "$ENVSEC_MANAGED_VARS" "${+STALE}"`, "zsh", script)
+	cmd.WaitDelay = 2 * time.Second
 	cmd.Env = []string{"PATH=/bin:/usr/bin", "STALE=inherited"}
 	got, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("zsh: %v\n%s", err, got)
 	}
 	want := value + "\np\nPLAIN TRICKY\n0\n"
+	if string(got) != want {
+		t.Fatalf("zsh printed %q\nwant        %q", got, want)
+	}
+}
+
+// TestEnvZshReadonlyTargetDoesNotAbortEval evals a full env output in a shell
+// where one target (RO) and one stale inherited name (STALE_RO) are readonly.
+// Every other line must still run: the other vars export, the stale scalar
+// is unset, and the sentinel lands. envsec cannot see the caller's shell, so
+// RO is silently skipped and still listed in ENVSEC_MANAGED_VARS; a later run
+// emits a guarded unset for it, which is a no-op.
+func TestEnvZshReadonlyTargetDoesNotAbortEval(t *testing.T) {
+	if _, err := os.Stat("/bin/zsh"); err != nil {
+		t.Skip("/bin/zsh not present")
+	}
+	env := func(k string) string {
+		if k == managedVar {
+			return "STALE STALE_RO"
+		}
+		return ""
+	}
+	r := runCLI(t, Deps{Keychain: fakeBundle(t, v("ALPHA", "a"), v("RO", "path[$(touch /nonexistent/marker)]"), v("ZED", "z")), Env: env}, "env")
+	if r.code != 0 || r.stderr != "" {
+		t.Fatalf("code=%d stderr=%q", r.code, r.stderr)
+	}
+	script := filepath.Join(t.TempDir(), "env.zsh")
+	if err := os.WriteFile(script, []byte(r.stdout), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/zsh", "-f", "-c",
+		`typeset -r RO=orig; typeset -r STALE_RO=keep; eval "$(cat "$1")"; rc=$?; printf '%s\n' "$rc" "$ALPHA" "$RO" "$ZED" "$STALE_RO" "${+STALE}" "$ENVSEC_MANAGED_VARS"`, "zsh", script)
+	cmd.WaitDelay = 2 * time.Second
+	cmd.Env = []string{"PATH=/bin:/usr/bin", "STALE=inherited"}
+	got, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("zsh: %v\n%s", err, got)
+	}
+	want := "0\na\norig\nz\nkeep\n0\nALPHA RO ZED\n"
 	if string(got) != want {
 		t.Fatalf("zsh printed %q\nwant        %q", got, want)
 	}
@@ -297,6 +356,26 @@ func TestKeychainFlagReachesStore(t *testing.T) {
 	_ = Run([]string{"--keychain", "/tmp/test.keychain-db", "--timeout", "3s", "list"}, &out, &errb)
 	if got.KeychainPath != "/tmp/test.keychain-db" || got.Timeout != 3*time.Second {
 		t.Fatalf("options = %+v", got)
+	}
+}
+
+func TestVerboseFlagReachesOnePass(t *testing.T) {
+	var got onepass.Options
+	orig := newOnePass
+	newOnePass = func(o onepass.Options) onepass.Client {
+		got = o
+		return &onepass.Fake{}
+	}
+	t.Cleanup(func() { newOnePass = orig })
+
+	var out, errb bytes.Buffer
+	_ = Run([]string{"--verbose", "--timeout", "3s", "check"}, &out, &errb)
+	if !got.Verbose || got.Timeout != 3*time.Second || got.Stderr != &errb {
+		t.Fatalf("options = %+v", got)
+	}
+	_ = Run([]string{"check"}, &out, &errb)
+	if got.Verbose {
+		t.Fatal("verbose set without --verbose")
 	}
 }
 

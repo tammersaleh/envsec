@@ -31,9 +31,12 @@ func TestIntegrationLoginKeychain(t *testing.T) {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, real.opts.SecurityPath,
+		cmd := exec.CommandContext(ctx, real.opts.SecurityPath,
 			"delete-generic-password", "-a", account, "-s", service, real.opts.KeychainPath,
-		).CombinedOutput()
+		)
+		cmd.Stdin = nil
+		cmd.WaitDelay = 2 * time.Second
+		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Errorf("cleanup delete-generic-password: %v\n%s", err, out)
 		}

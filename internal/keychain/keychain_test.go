@@ -263,16 +263,16 @@ func TestWriteErrors(t *testing.T) {
 		wantDetail string
 	}{
 		{
-			name:       "nonzero exit",
+			name:       "nonzero exit never carries stderr",
 			stderr:     "security: SecKeychainItemCreateFromContent: User interaction is not allowed.\n",
 			exitCode:   36,
-			wantDetail: "security: SecKeychainItemCreateFromContent: User interaction is not allowed.",
+			wantDetail: "security add-generic-password exited 36",
 		},
 		{
-			name:       "runner error",
+			name:       "runner error never carries its text",
 			runErr:     errors.New("boom"),
 			exitCode:   -1,
-			wantDetail: "boom",
+			wantDetail: "security add-generic-password could not run",
 		},
 	}
 	for _, tc := range tests {
@@ -294,6 +294,75 @@ func TestWriteErrors(t *testing.T) {
 				t.Error("error message leaks the value")
 			}
 		})
+	}
+}
+
+// TestWriteErrorNeverEchoesValue models a security wrapper that prints its
+// argv: the -w value shows up in stderr and in the runner error, and neither
+// may reach the returned error.
+func TestWriteErrorNeverEchoesValue(t *testing.T) {
+	const secret = "c3VwZXJzZWNyZXQ="
+	echoing := func(_ context.Context, name string, args ...string) ([]byte, []byte, int, error) {
+		argv := name + " " + strings.Join(args, " ")
+		return nil, []byte("wrapper: " + argv + "\n"), 1, errors.New("wrapper failed: " + argv)
+	}
+	for name, run := range map[string]Runner{
+		"stderr and error": echoing,
+		"stderr only": func(ctx context.Context, name string, args ...string) ([]byte, []byte, int, error) {
+			_, stderr, code, _ := echoing(ctx, name, args...)
+			return nil, stderr, code, nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := New(Options{KeychainPath: tempKeychain(t), Run: run})
+			err := s.Write(context.Background(), []byte(secret))
+			if err == nil {
+				t.Fatal("want error")
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("error leaks the value: %q", err.Error())
+			}
+			var ue *UnavailableError
+			if !errors.As(err, &ue) || !strings.HasPrefix(ue.Detail, "security add-generic-password ") {
+				t.Fatalf("got %T %v", err, err)
+			}
+		})
+	}
+}
+
+func TestWriteTimeoutDetail(t *testing.T) {
+	blocking := func(ctx context.Context, _ string, _ ...string) ([]byte, []byte, int, error) {
+		<-ctx.Done()
+		return nil, []byte("argv echo"), -1, ctx.Err()
+	}
+	s := New(Options{KeychainPath: tempKeychain(t), Timeout: 10 * time.Millisecond, Run: blocking})
+	err := s.Write(context.Background(), []byte("x"))
+	var ue *UnavailableError
+	if !errors.As(err, &ue) {
+		t.Fatalf("got %T %v", err, err)
+	}
+	if ue.Detail != "security add-generic-password timed out after 10ms" {
+		t.Errorf("detail = %q", ue.Detail)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Error("write timeout does not unwrap to context.DeadlineExceeded")
+	}
+}
+
+// TestExecRunnerClosesStdin runs a real subprocess that reads stdin; with
+// stdin closed it must finish at once rather than wait on the terminal.
+func TestExecRunnerClosesStdin(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stdout, _, code, err := execRunner(ctx, "/bin/sh", "-c", "cat; echo done")
+	if err != nil || code != 0 {
+		t.Fatalf("code=%d err=%v", code, err)
+	}
+	if string(stdout) != "done\n" {
+		t.Errorf("stdout = %q", stdout)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("runner waited on stdin until the deadline")
 	}
 }
 

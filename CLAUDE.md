@@ -188,6 +188,11 @@ stdlib unless SPEC says so. Go 1.25.
   starts while a prompt is unanswered hangs until answered. From an agent,
   wrap `op` and `security` calls in `timeout`.
 - Killed `security` processes leave their dialogs on screen.
+- zsh: `unset` and `export` are special builtins. When one fails (readonly
+  parameter, array type mismatch) inside `eval`, zsh aborts the rest of that
+  eval, not just the line. `export` lines guard with `[[ ${(t)X} != *readonly* ]]`
+  for that reason. Test loader output by eval'ing it, and single-quote the
+  eval argument in tests or `$(...)` in a payload expands before the eval.
 - zsh: `local x` inside a loop re-declares an existing parameter and prints its
   value. Irrelevant now that the loader is Go, kept as a warning for the
   one-liner in `~/.zsh/d/secrets.zsh`.
