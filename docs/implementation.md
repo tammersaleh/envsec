@@ -36,7 +36,7 @@ session commits after each phase, reviews before push.
 
 ### Phase 2 (one agent)
 
-- [ ] Kong root with global flags, `version`, `env`, `list`. Exit-code mapping
+- [x] Kong root with global flags, `version`, `env`, `list`. Exit-code mapping
   in `main.go`. Fatal error JSON on stderr. `env` round-trip test through real
   `zsh`.
 
