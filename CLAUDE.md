@@ -213,3 +213,11 @@ stdlib unless SPEC says so. Go 1.25.
   `op item edit <id> --account <url>` with NO `-` argument. `op item edit <id>
   -` exits 0 and changes nothing. Re-read the item afterwards to confirm.
   Values never enter argv this way. Done for the first nine items 2026-09-15.
+- Over ssh the login keychain is locked even with a console login: securityd
+  unlocks per audit session and sshd starts a new one. `security` exits 36
+  ("User interaction is not allowed"); `show-keychain-info` fails the same way
+  when locked and exits 0 when unlocked. No PAM module unlocks it, and
+  `launchctl asuser` into the GUI session needs root. `~/.zsh/d/secrets.zsh`
+  runs `security unlock-keychain` (password prompt) when `$SSH_CONNECTION` is
+  set and the keychain is locked. To test envsec against a locked keychain,
+  scp the built binary to a second Mac and run it over `ssh -o BatchMode=yes`.
