@@ -156,9 +156,9 @@ func TestReadErrors(t *testing.T) {
 		},
 		{
 			name:       "other exit is unavailable with first stderr line",
-			stderr:     "security: SecKeychainUnlock: User interaction is not allowed.\nsecond line\n",
-			exitCode:   36,
-			wantDetail: "security: SecKeychainUnlock: User interaction is not allowed.",
+			stderr:     "security: SecKeychainUnlock: something else.\nsecond line\n",
+			exitCode:   50,
+			wantDetail: "security: SecKeychainUnlock: something else.",
 		},
 		{
 			name:       "nonzero exit with empty stderr",
@@ -192,6 +192,75 @@ func TestReadErrors(t *testing.T) {
 			}
 			if ue.Detail != tc.wantDetail {
 				t.Errorf("detail: got %q, want %q", ue.Detail, tc.wantDetail)
+			}
+		})
+	}
+}
+
+func TestReadLocked(t *testing.T) {
+	tests := []struct {
+		name     string
+		stderr   string
+		exitCode int
+	}{
+		{"exit 36 with empty stderr", "", 36},
+		{"exit 36 with stderr", "security: SecKeychainSearchCopyNext: User interaction is not allowed.\n", 36},
+		{"stderr phrase with other exit", "security: SecKeychainSearchCopyNext: User interaction is not allowed.\n", 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			kc := tempKeychain(t)
+			var calls []call
+			s := New(Options{KeychainPath: kc, Run: scripted(&calls, "", tc.stderr, tc.exitCode, nil)})
+			_, err := s.Read(context.Background())
+			var le *LockedError
+			if !errors.As(err, &le) {
+				t.Fatalf("got %T %v, want *LockedError", err, err)
+			}
+			if le.KeychainPath != kc {
+				t.Errorf("KeychainPath = %q, want %q", le.KeychainPath, kc)
+			}
+			if want := "keychain locked: " + kc; err.Error() != want {
+				t.Errorf("Error() = %q, want %q", err.Error(), want)
+			}
+			var ue *UnavailableError
+			if errors.As(err, &ue) {
+				t.Error("locked must not also be *UnavailableError")
+			}
+			if errors.Is(err, ErrNotFound) {
+				t.Error("locked must not be ErrNotFound")
+			}
+		})
+	}
+}
+
+func TestWriteLocked(t *testing.T) {
+	const secret = "c3VwZXJzZWNyZXQ="
+	tests := []struct {
+		name     string
+		stderr   string
+		exitCode int
+		wantLock bool
+	}{
+		{"exit 36 is locked", "", 36, true},
+		{"exit 36 with argv echo is locked", "wrapper: -w " + secret + "\n", 36, true},
+		{"stderr phrase alone is not locked", "security: User interaction is not allowed.\n", 1, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			kc := tempKeychain(t)
+			var calls []call
+			s := New(Options{KeychainPath: kc, Run: scripted(&calls, "", tc.stderr, tc.exitCode, nil)})
+			err := s.Write(context.Background(), []byte(secret))
+			var le *LockedError
+			if errors.As(err, &le) != tc.wantLock {
+				t.Fatalf("got %T %v, want locked=%v", err, err, tc.wantLock)
+			}
+			if tc.wantLock && le.KeychainPath != kc {
+				t.Errorf("KeychainPath = %q, want %q", le.KeychainPath, kc)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Error("error message leaks the value")
 			}
 		})
 	}
@@ -264,9 +333,9 @@ func TestWriteErrors(t *testing.T) {
 	}{
 		{
 			name:       "nonzero exit never carries stderr",
-			stderr:     "security: SecKeychainItemCreateFromContent: User interaction is not allowed.\n",
-			exitCode:   36,
-			wantDetail: "security add-generic-password exited 36",
+			stderr:     "security: SecKeychainItemCreateFromContent: some failure.\n",
+			exitCode:   1,
+			wantDetail: "security add-generic-password exited 1",
 		},
 		{
 			name:       "runner error never carries its text",

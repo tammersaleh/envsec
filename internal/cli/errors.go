@@ -66,6 +66,15 @@ func asExit(err error) *ExitError {
 		}
 		return &ExitError{Code: ExitOnePassAuth, Err: "onepassword_unauthorized", Detail: ae.Detail, Hint: hint}
 	}
+	var le *keychain.LockedError
+	if errors.As(err, &le) {
+		return &ExitError{
+			Code:   ExitKeychain,
+			Err:    "keychain_locked",
+			Detail: le.Error() + " (no UI session; typical over ssh)",
+			Hint:   "security unlock-keychain " + le.KeychainPath,
+		}
+	}
 	var ue *keychain.UnavailableError
 	if errors.As(err, &ue) {
 		return &ExitError{Code: ExitKeychain, Err: "keychain_unavailable", Detail: ue.Error(), Hint: hintSync}

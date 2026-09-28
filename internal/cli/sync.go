@@ -85,7 +85,10 @@ func (c SyncCmd) Run(rc *runContext) error {
 		if e.Code != ExitKeychain {
 			e = &ExitError{Code: ExitKeychain, Err: "keychain_unavailable", Detail: err.Error()}
 		}
-		e.Hint = "unlock the login keychain and rerun envsec sync"
+		// A locked keychain already carries the unlock command as its hint.
+		if e.Err != "keychain_locked" {
+			e.Hint = "unlock the login keychain and rerun envsec sync"
+		}
 		return e
 	}
 

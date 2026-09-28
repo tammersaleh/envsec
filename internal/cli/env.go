@@ -22,7 +22,9 @@ func (EnvCmd) Run(rc *runContext) error {
 	b, err := readBundle(rc)
 	if err != nil {
 		e := asExit(err)
-		_, _ = fmt.Fprintf(rc.stderr, "envsec: %s; run %s\n", e.Detail, hintSync)
+		// Every exit-4 error from readBundle carries a Hint (see asExit and
+		// readBundle), so this line never ends in "run ".
+		_, _ = fmt.Fprintf(rc.stderr, "envsec: %s; run %s\n", e.Detail, e.Hint)
 		e.Silent = true
 		return e
 	}

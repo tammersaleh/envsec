@@ -153,7 +153,11 @@ Exit codes: `0` success; `1` general or partial failure; `2` 1Password not
 signed in or locked past its prompt, including `op account list` returning
 zero accounts and any `op` command hitting the `--timeout` deadline (an
 unanswered prompt is indistinguishable from a lock); `4` keychain unavailable
-(locked, missing file, `security` failure).
+(missing file, `security` failure, or locked). A locked keychain that
+`security` cannot prompt to unlock (exit 36, the normal state over ssh, where
+the session has no UI) is `keychain_locked` with hint
+`security unlock-keychain <path>`; `envsec sync` fails the same way, so it is
+never the hint.
 
 ## Hardening rules for `env`
 

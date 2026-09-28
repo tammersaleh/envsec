@@ -198,6 +198,7 @@ func TestEnvUnreadableBundle(t *testing.T) {
 	}{
 		"missing item":   {&keychain.Fake{}, "envsec: no envsec bundle in the keychain; run envsec sync\n"},
 		"unavailable":    {&keychain.Fake{ReadErr: &keychain.UnavailableError{Detail: "locked"}}, "envsec: keychain unavailable: locked; run envsec sync\n"},
+		"locked":         {&keychain.Fake{ReadErr: &keychain.LockedError{KeychainPath: "/k/login.keychain-db"}}, "envsec: keychain locked: /k/login.keychain-db (no UI session; typical over ssh); run security unlock-keychain /k/login.keychain-db\n"},
 		"bad base64":     {&keychain.Fake{Exists: true, Value: []byte("!!!")}, "envsec: bundle is not valid base64: illegal base64 data at input byte 0; run envsec sync\n"},
 		"bad json":       {&keychain.Fake{Exists: true, Value: []byte(base64.StdEncoding.EncodeToString([]byte("{")))}, "envsec: bundle is not valid JSON: unmarshal failed; run envsec sync\n"},
 		"no vars":        {&keychain.Fake{Exists: true, Value: []byte(base64.StdEncoding.EncodeToString([]byte(`{"schema":1,"generated_at":"2026-09-14T17:02:11Z"}`)))}, "envsec: bundle is not valid JSON: missing vars; run envsec sync\n"},
@@ -212,7 +213,7 @@ func TestEnvUnreadableBundle(t *testing.T) {
 			if r.code != 4 {
 				t.Fatalf("code=%d err=%v", r.code, r.err)
 			}
-			if strings.Count(r.stderr, "\n") != 1 || !strings.HasPrefix(r.stderr, "envsec: ") || !strings.HasSuffix(r.stderr, "; run envsec sync\n") {
+			if strings.Count(r.stderr, "\n") != 1 || !strings.HasPrefix(r.stderr, "envsec: ") || !strings.Contains(r.stderr, "; run ") || strings.HasSuffix(r.stderr, "; run \n") {
 				t.Fatalf("stderr = %q", r.stderr)
 			}
 			if strings.HasPrefix(r.stderr, "{") {
@@ -331,6 +332,7 @@ func TestListUnreadable(t *testing.T) {
 	}{
 		"missing":     {&keychain.Fake{}, `{"error":"bundle_missing","detail":"no envsec bundle in the keychain","hint":"envsec sync"}` + "\n"},
 		"unavailable": {&keychain.Fake{ReadErr: &keychain.UnavailableError{Detail: "locked"}}, `{"error":"keychain_unavailable","detail":"keychain unavailable: locked","hint":"envsec sync"}` + "\n"},
+		"locked":      {&keychain.Fake{ReadErr: &keychain.LockedError{KeychainPath: "/k/login.keychain-db"}}, `{"error":"keychain_locked","detail":"keychain locked: /k/login.keychain-db (no UI session; typical over ssh)","hint":"security unlock-keychain /k/login.keychain-db"}` + "\n"},
 		"bad base64":  {&keychain.Fake{Exists: true, Value: []byte("!!!")}, `{"error":"bundle_invalid","detail":"bundle is not valid base64: illegal base64 data at input byte 0","hint":"envsec sync"}` + "\n"},
 	}
 	for name, tc := range cases {
@@ -390,6 +392,7 @@ func TestExitCode(t *testing.T) {
 		{"generic", errors.New("boom"), 1, "failed"},
 		{"auth", &onepass.AuthError{Account: onepass.Account{URL: "my.1password.com"}, Detail: "locked"}, 2, "onepassword_unauthorized"},
 		{"unavailable", &keychain.UnavailableError{Detail: "x"}, 4, "keychain_unavailable"},
+		{"locked", &keychain.LockedError{KeychainPath: "/k"}, 4, "keychain_locked"},
 		{"not found", keychain.ErrNotFound, 4, "bundle_missing"},
 		{"bad base64", bundle.ErrBadBase64, 4, "bundle_invalid"},
 		{"bad json", bundle.ErrBadJSON, 4, "bundle_invalid"},

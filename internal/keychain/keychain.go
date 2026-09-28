@@ -21,18 +21,33 @@ import (
 // Store reads and replaces the single keychain item envsec owns.
 type Store interface {
 	// Read returns the item's value, raw bytes as stored. It returns
-	// ErrNotFound when the item does not exist and *UnavailableError when the
-	// keychain cannot be used.
+	// ErrNotFound when the item does not exist, *LockedError when the keychain
+	// is locked and cannot prompt, and *UnavailableError when the keychain
+	// cannot be used for any other reason.
 	Read(ctx context.Context) ([]byte, error)
-	// Write replaces the item's value atomically, creating it if absent.
+	// Write replaces the item's value atomically, creating it if absent. It
+	// returns *LockedError and *UnavailableError as Read does.
 	Write(ctx context.Context, value []byte) error
 }
 
 // ErrNotFound reports that the keychain is usable but holds no item.
 var ErrNotFound = errors.New("keychain item not found")
 
-// UnavailableError reports that the keychain could not be used: locked,
-// missing file, security failure, or timeout. Callers map it to exit code 4.
+// LockedError reports that the keychain is locked and security could not
+// prompt to unlock it (errSecInteractionNotAllowed, exit 36). This is the
+// normal state of the login keychain in a session without UI, such as ssh.
+// Callers map it to exit code 4 with the hint
+// `security unlock-keychain <KeychainPath>`.
+type LockedError struct {
+	KeychainPath string
+}
+
+func (e *LockedError) Error() string {
+	return "keychain locked: " + e.KeychainPath
+}
+
+// UnavailableError reports that the keychain could not be used: missing
+// file, security failure, or timeout. Callers map it to exit code 4.
 // Detail is the first line of security's stderr or a short description; it
 // never contains the item value.
 type UnavailableError struct {
@@ -81,7 +96,13 @@ const (
 
 	// exitNotFound is errSecItemNotFound as reported by security.
 	exitNotFound = 44
+	// exitInteractionNotAllowed is errSecInteractionNotAllowed: the keychain
+	// is locked and security cannot prompt.
+	exitInteractionNotAllowed = 36
 )
+
+// lockedPhrase is security's stderr text for errSecInteractionNotAllowed.
+const lockedPhrase = "User interaction is not allowed"
 
 type store struct {
 	opts Options
@@ -136,6 +157,9 @@ func (s *store) Read(ctx context.Context) ([]byte, error) {
 	if code == exitNotFound || bytes.Contains(stderr, []byte("could not be found")) {
 		return nil, ErrNotFound
 	}
+	if code == exitInteractionNotAllowed || bytes.Contains(stderr, []byte(lockedPhrase)) {
+		return nil, &LockedError{KeychainPath: s.opts.KeychainPath}
+	}
 	if code != 0 {
 		return nil, unavailable(stderr, code)
 	}
@@ -166,6 +190,9 @@ func (s *store) Write(ctx context.Context, value []byte) error {
 			return &UnavailableError{Detail: fmt.Sprintf("%s timed out after %s", what, s.opts.Timeout), err: err}
 		}
 		return &UnavailableError{Detail: what + " could not run"}
+	}
+	if code == exitInteractionNotAllowed {
+		return &LockedError{KeychainPath: s.opts.KeychainPath}
 	}
 	if code != 0 {
 		return &UnavailableError{Detail: fmt.Sprintf("%s exited %d", what, code)}

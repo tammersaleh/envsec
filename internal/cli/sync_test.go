@@ -573,6 +573,23 @@ func TestSyncKeychainWriteError(t *testing.T) {
 	}
 }
 
+func TestSyncKeychainWriteLocked(t *testing.T) {
+	kc := &keychain.Fake{WriteErr: &keychain.LockedError{KeychainPath: "/k/login.keychain-db"}}
+	r := runSync(t, Deps{Keychain: kc, OnePass: fakeOp(varItem("ALPHA", "a"))})
+	want := `{"error":"keychain_locked","detail":"keychain locked: /k/login.keychain-db (no UI session; typical over ssh)","hint":"security unlock-keychain /k/login.keychain-db"}` + "\n"
+	if r.code != 4 || r.stdout != "" || r.stderr != want {
+		t.Fatalf("code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
+	}
+}
+
+func TestSyncKeychainReadLocked(t *testing.T) {
+	kc := &keychain.Fake{ReadErr: &keychain.LockedError{KeychainPath: "/k/login.keychain-db"}}
+	r := runSync(t, Deps{Keychain: kc, OnePass: fakeOp(varItem("ALPHA", "a"))})
+	if r.code != 4 || r.stdout != "" || !strings.Contains(r.stderr, `"error":"keychain_locked"`) || kc.Writes != 0 {
+		t.Fatalf("code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
+	}
+}
+
 func TestSyncKeychainReadError(t *testing.T) {
 	kc := &keychain.Fake{ReadErr: &keychain.UnavailableError{Detail: "locked"}}
 	r := runSync(t, Deps{Keychain: kc, OnePass: fakeOp(varItem("ALPHA", "a"))})
