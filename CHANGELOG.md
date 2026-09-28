@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/tammersaleh/envsec/compare/v1.0.0...v1.0.1) (2026-09-28)
+
+
+### Bug Fixes
+
+* report a locked keychain as keychain_locked with the unlock command ([358e986](https://github.com/tammersaleh/envsec/commit/358e98641348ce0e8f8d4dd87ee98f6e013d69ae))
+
 ## 1.0.0 (2026-09-15)
 
 
