@@ -39,7 +39,5 @@ homebrew_casks:
     description: Export 1Password secrets as environment variables via the macOS keychain
     hooks:
       post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/envsec"]
-          end
+        install_steps: |
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/envsec"]
