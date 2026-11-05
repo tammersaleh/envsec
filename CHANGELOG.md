@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/tammersaleh/envsec/compare/v1.0.1...v1.0.2) (2026-11-05)
+
+
+### Bug Fixes
+
+* **release:** migrate cask post-install hook to install_steps ([0955fba](https://github.com/tammersaleh/envsec/commit/0955fbad8d14b4028b990581a543652b81b64e80))
+
 ## [1.0.1](https://github.com/tammersaleh/envsec/compare/v1.0.0...v1.0.1) (2026-09-28)
 
 
