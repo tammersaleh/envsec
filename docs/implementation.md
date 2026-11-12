@@ -73,7 +73,10 @@ session commits after each phase, reviews before push.
   COLUMNS LINES HISTSIZE SAVEHIST HISTFILE GID EGID USERNAME`) and the `OP_`
   prefix, which would reconfigure the `op` child. Second review added
   `RPROMPT2 KEYTIMEOUT FUNCNEST LISTMAX MAILCHECK OPTIND TRY_BLOCK_ERROR
-  TRY_BLOCK_INTERRUPT ARGC HISTCMD TTYIDLE` and the `ZSH_` prefix.
+  TRY_BLOCK_INTERRUPT ARGC HISTCMD TTYIDLE` and the `ZSH_` prefix. A security
+  audit on 2026-11-12 added `BASH_ENV MAILPATH PROMPT_EOL_MARK` and the
+  `GIT_CONFIG_` prefix, each of which makes a program run or re-expand its
+  value.
 - `env` clears rejected and stale vars with `builtin unset -- VAR`, never bare
   `unset`.
 - Every export line is `[[ ${(t)VAR} != *readonly* ]] && builtin unset --

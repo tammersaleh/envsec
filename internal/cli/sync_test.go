@@ -152,6 +152,20 @@ func TestSyncSelectionErrorsLeaveKeychainUntouched(t *testing.T) {
 			`{"var":"E","account":"my.1password.com","status":"error","detail":"item \"Title E\" (item-e): E is empty"}`},
 		"newline": {varItem("NL", "a\nb"),
 			`{"var":"NL","account":"my.1password.com","status":"error","detail":"item \"Title NL\" (item-nl): NL contains a newline"}`},
+		"denylisted BASH_ENV": {varItem("BASH_ENV", "x"),
+			`{"var":"BASH_ENV","account":"my.1password.com","status":"error","detail":"item \"Title BASH_ENV\" (item-bash_env): label BASH_ENV is denylisted"}`},
+		"denylisted MAILPATH": {varItem("MAILPATH", "x"),
+			`{"var":"MAILPATH","account":"my.1password.com","status":"error","detail":"item \"Title MAILPATH\" (item-mailpath): label MAILPATH is denylisted"}`},
+		"denylisted PROMPT_EOL_MARK": {varItem("PROMPT_EOL_MARK", "x"),
+			`{"var":"PROMPT_EOL_MARK","account":"my.1password.com","status":"error","detail":"item \"Title PROMPT_EOL_MARK\" (item-prompt_eol_mark): label PROMPT_EOL_MARK is denylisted"}`},
+		"denylisted GIT_CONFIG_COUNT": {varItem("GIT_CONFIG_COUNT", "1"),
+			`{"var":"GIT_CONFIG_COUNT","account":"my.1password.com","status":"error","detail":"item \"Title GIT_CONFIG_COUNT\" (item-git_config_count): label GIT_CONFIG_COUNT is denylisted"}`},
+		"denylisted GIT_CONFIG_KEY_0": {varItem("GIT_CONFIG_KEY_0", "x"),
+			`{"var":"GIT_CONFIG_KEY_0","account":"my.1password.com","status":"error","detail":"item \"Title GIT_CONFIG_KEY_0\" (item-git_config_key_0): label GIT_CONFIG_KEY_0 is denylisted"}`},
+		"denylisted GIT_CONFIG_VALUE_0": {varItem("GIT_CONFIG_VALUE_0", "x"),
+			`{"var":"GIT_CONFIG_VALUE_0","account":"my.1password.com","status":"error","detail":"item \"Title GIT_CONFIG_VALUE_0\" (item-git_config_value_0): label GIT_CONFIG_VALUE_0 is denylisted"}`},
+		"denylisted GIT_CONFIG_PARAMETERS": {varItem("GIT_CONFIG_PARAMETERS", "x"),
+			`{"var":"GIT_CONFIG_PARAMETERS","account":"my.1password.com","status":"error","detail":"item \"Title GIT_CONFIG_PARAMETERS\" (item-git_config_parameters): label GIT_CONFIG_PARAMETERS is denylisted"}`},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

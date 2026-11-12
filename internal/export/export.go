@@ -21,7 +21,10 @@ var LabelPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
 
 // deniedExact holds names that must never be exported: shell identity and
 // loader variables, plus zsh special parameters that re-expand their value
-// on every prompt or are read-only. See SPEC.md "The 1Password contract".
+// on every prompt or are read-only. BASH_ENV is expanded and sourced by every
+// non-interactive bash. zsh expands the message part of MAILPATH when the
+// watched file changes, and prompt-expands PROMPT_EOL_MARK. See SPEC.md "The
+// 1Password contract".
 var deniedExact = map[string]bool{
 	"PATH": true, "HOME": true, "USER": true, "LOGNAME": true, "SHELL": true,
 	"TMPDIR": true, "UID": true, "EUID": true, "IFS": true, "FPATH": true,
@@ -37,11 +40,13 @@ var deniedExact = map[string]bool{
 	"RPROMPT2": true, "KEYTIMEOUT": true, "FUNCNEST": true, "LISTMAX": true,
 	"MAILCHECK": true, "OPTIND": true, "TRY_BLOCK_ERROR": true,
 	"TRY_BLOCK_INTERRUPT": true, "ARGC": true, "HISTCMD": true, "TTYIDLE": true,
+	"BASH_ENV": true, "MAILPATH": true, "PROMPT_EOL_MARK": true,
 }
 
 // deniedPrefixes: OP_ reconfigures the op child that sync runs; ZSH_ is the
-// shell's own namespace.
-var deniedPrefixes = []string{"LC_", "DYLD_", "LD_", "ENVSEC_", "OP_", "ZSH_"}
+// shell's own namespace. GIT_CONFIG_ (COUNT, KEY_<n>, VALUE_<n>, PARAMETERS)
+// injects git config, and keys such as core.fsmonitor run a command.
+var deniedPrefixes = []string{"LC_", "DYLD_", "LD_", "ENVSEC_", "OP_", "ZSH_", "GIT_CONFIG_"}
 
 // Denied reports whether name may never be exported. Case-sensitive: labels
 // that reach it already match LabelPattern.

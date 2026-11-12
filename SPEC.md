@@ -32,10 +32,15 @@ UID EUID IFS FPATH ZDOTDIR ENV SHLVL TERM LANG NODE_OPTIONS GIT_SSH_COMMAND
 PROMPT PS1 PS2 PS3 PS4 RPROMPT RPS1 RPS2 PROMPT2 PROMPT3 PROMPT4 SPROMPT PPID
 LINENO RANDOM SECONDS COLUMNS LINES HISTSIZE SAVEHIST HISTFILE GID EGID
 USERNAME RPROMPT2 KEYTIMEOUT FUNCNEST LISTMAX MAILCHECK OPTIND TRY_BLOCK_ERROR
-TRY_BLOCK_INTERRUPT ARGC HISTCMD TTYIDLE` and prefixes `LC_ DYLD_ LD_ ENVSEC_
-OP_ ZSH_`. The zsh names are special parameters that re-expand their values,
-change shell behavior, or are read-only; `OP_*` reconfigures the `op` child
-`sync` runs; `ZSH_*` is the shell's own namespace.
+TRY_BLOCK_INTERRUPT ARGC HISTCMD TTYIDLE BASH_ENV MAILPATH PROMPT_EOL_MARK` and
+prefixes `LC_ DYLD_ LD_ ENVSEC_ OP_ ZSH_ GIT_CONFIG_`. The zsh names are
+special parameters that re-expand their values, change shell behavior, or are
+read-only; `OP_*` reconfigures the `op` child `sync` runs; `ZSH_*` is the
+shell's own namespace. `BASH_ENV` is expanded and sourced by every
+non-interactive bash. `GIT_CONFIG_*` (`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`,
+`GIT_CONFIG_VALUE_<n>`, `GIT_CONFIG_PARAMETERS`) injects git config, and keys
+such as `core.fsmonitor` run a command. `BASH_ENV`, `MAILPATH`,
+`PROMPT_EOL_MARK`, and `GIT_CONFIG_` were added 2026-11-12.
 
 Two in-scope fields with the same label are a conflict: two fields in one
 item, two items in one account, or items across accounts. Conflict identity is
