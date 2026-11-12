@@ -4,37 +4,84 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: write
-  pull-requests: write
+permissions: {}
+
+# One release run at a time. Two quick pushes would otherwise run release-please
+# side by side and race on the same release PR.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  release-please:
+  # Verify every push except the squash-merged release PR, which changes only
+  # CHANGELOG.md and .release-please-manifest.json. Anything unprovable verifies.
+  changes:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      verify: ${{ steps.diff.outputs.verify }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: diff
+        name: Decide whether verification is required
+        shell: bash
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          verify=true
+          if [[ ! "$BEFORE" =~ ^0+$ ]] &&
+             git cat-file -e "$BEFORE^{commit}" 2>/dev/null &&
+             git diff --quiet "$BEFORE" "$AFTER" -- . ':(exclude)CHANGELOG.md' ':(exclude).release-please-manifest.json' &&
+             ! git diff --quiet "$BEFORE" "$AFTER" -- CHANGELOG.md .release-please-manifest.json
+          then
+            verify=false
+          fi
+          echo "verify=$verify" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: changes
+    if: needs.changes.outputs.verify == 'true'
+    uses: ./.github/workflows/ci.yml
+    with:
+      govulncheck: true
+    permissions:
+      contents: read
+
+  release-please:
+    needs: [changes, verify]
+    # Runs after verify passes, or after it was skipped for the release commit.
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (needs.verify.result == 'success' || needs.verify.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    permissions: {}
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
       pr: ${{ steps.release.outputs.pr }}
     steps:
-      # Use RELEASE_PAT so the PR is user-attributed. GITHUB_TOKEN-created
-      # PRs do not trigger pull_request workflows, so CI would never run
-      # on the release PR and auto-merge would stay blocked forever.
-      - uses: googleapis/release-please-action@v4
+      # RELEASE_PAT, not GITHUB_TOKEN, opens the release PR and cuts the tag.
+      # CI ignores the release PR on purpose: verify already tested the commits
+      # it releases.
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
         with:
           token: ${{ secrets.RELEASE_PAT }}
 
-      # Auto-merge the release PR so releases ship unattended. Must use
-      # RELEASE_PAT (user-attributed), not GITHUB_TOKEN - otherwise the
-      # resulting merge commit won't trigger this workflow again to run
-      # goreleaser.
+      # Merge the release PR at once so releases ship unattended. The merge must
+      # use RELEASE_PAT: a merge made with GITHUB_TOKEN produces a push that
+      # triggers no workflow, and the push from this merge is what runs this
+      # workflow again to cut the tag and run goreleaser.
       # The PR number comes through the environment, not string interpolation.
       # Inlining ${{ steps.release.outputs.pr }} into the script put the PR body
       # - which quotes commit subjects verbatim - inside single quotes, so one
       # apostrophe in a commit subject ("can't") ended the quoted string and the
       # step died with a bash syntax error. Releases then stalled silently: CI
-      # was green, the release PR just never got auto-merge enabled.
-      - name: Enable auto-merge on release PR
+      # was green, the release PR just never merged.
+      - name: Merge release PR
         if: ${{ steps.release.outputs.pr }}
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PAT }}
@@ -42,22 +89,37 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           pr_number=$(jq -r '.number' <<<"$RELEASE_PR")
-          gh pr merge --auto --squash "$pr_number" --repo "$REPO"
+          # Mergeability may not be computed yet right after the PR is updated.
+          for attempt in 1 2 3 4 5; do
+            if gh pr merge --squash "$pr_number" --repo "$REPO"; then
+              exit 0
+            fi
+            echo "merge attempt $attempt failed" >&2
+            sleep 5
+          done
+          exit 1
 
   goreleaser:
     needs: release-please
-    if: ${{ needs.release-please.outputs.release_created }}
+    # verify is skipped on the release commit, and a job is skipped when anything
+    # in its needs chain was skipped unless its `if` uses a status function.
+    if: ${{ !cancelled() && needs.release-please.result == 'success' && needs.release-please.outputs.release_created }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ needs.release-please.outputs.tag_name }}
-      - uses: jdx/mise-action@v2
-      - uses: goreleaser/goreleaser-action@v6
+          # GoReleaser authenticates through the environment, not .git/config.
+          persist-credentials: false
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
-          version: latest
+          version: v2.20.0
           args: release --clean
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.RELEASE_PAT }}
+          GITHUB_TOKEN: ${{ github.token }}
+          # Scoped to the tap repo only. .goreleaser.yml reads it for the cask push.
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

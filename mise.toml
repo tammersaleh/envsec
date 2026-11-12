@@ -3,6 +3,8 @@ go = "1.25"
 # golangci-lint v2 (v1.64.x predates Go 1.25 and its bundled x/tools emits
 # false-positive staticcheck findings on 1.25 sources).
 "go:github.com/golangci/golangci-lint/v2/cmd/golangci-lint" = "2.12.2"
+# govulncheck is pinned to 1.1.4 because newer releases need Go 1.26.
+"go:golang.org/x/vuln/cmd/govulncheck" = "1.1.4"
 
 [tasks.build]
 run = "go build -o envsec ./cmd/envsec"

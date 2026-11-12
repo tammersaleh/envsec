@@ -89,9 +89,11 @@ the symptom and wrong about the cause. Say which claims held.
 
 ## Release versioning
 
-Releases are fully automated via release-please + GoReleaser. Release-please
-watches main; a version-bumping commit opens a release PR that auto-merges once
-CI passes. The merge cuts a tag and GitHub Release; GoReleaser builds the
+Releases are fully automated via release-please + GoReleaser. `release.yml`
+runs `verify` (the steps in `ci.yml` plus govulncheck) on every push to main
+except the release commit itself. Release-please runs only after `verify`
+passes. A version-bumping commit opens a release PR that merges at once. The
+merge push cuts a tag and GitHub Release; GoReleaser builds the
 binary and pushes an updated **cask** to `tammersaleh/homebrew-tap`
 (`Casks/envsec.rb`, not `Formula/`). Nobody runs `git tag` by hand, nobody
 clicks Merge on the release PR.
@@ -155,8 +157,18 @@ Same as the sibling CLIs. Full detail in `SPEC.md`.
 
 ## Git
 
-Personal project. Commit on main, push. Don't open pull requests; the only PR
-is release-please's. Commits are GPG-signed.
+Personal project. Commit on main, push. Don't open pull requests; the only PRs
+are release-please's and Dependabot's. Commits are GPG-signed.
+
+Dependabot opens monthly grouped PRs for `gomod` and `github-actions`, and
+`pr.yml` merges them once tests pass. A merged bump cuts no release by itself.
+It ships with the next pushed release. Major versions are ignored, so bump
+those by hand.
+
+Three workflow files: `ci.yml` holds the test steps and is reusable only,
+`pr.yml` calls it for pull requests and merges Dependabot PRs, `release.yml`
+calls it as `verify` for pushes to main. Jobs in `ci.yml` must stay at
+`contents: read`. A called workflow cannot request more than its caller grants.
 
 The SSH remote key is fingerprint-gated, so a non-interactive `git push` over
 SSH stalls. Push over HTTPS with the gh credential helper: `gh auth setup-git`

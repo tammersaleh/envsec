@@ -1,0 +1,32 @@
+name: CI
+
+# Pull requests only. Pushes to main are tested by the verify job in
+# release.yml. The release PR is ignored on purpose.
+on:
+  pull_request:
+    paths-ignore:
+      - CHANGELOG.md
+      - .release-please-manifest.json
+
+permissions: {}
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  # Lives here, not in ci.yml: a called workflow cannot request more
+  # permissions than its caller grants, and release.yml grants read only.
+  dependabot-merge:
+    needs: ci
+    if: ${{ needs.ci.result == 'success' && github.event_name == 'pull_request' && github.event.pull_request.user.login == 'dependabot[bot]' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_URL: ${{ github.event.pull_request.html_url }}
+    steps:
+      - run: gh pr merge --squash "$PR_URL"

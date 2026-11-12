@@ -1,0 +1,36 @@
+version: 2
+
+# Monthly grouped minor and patch updates. Majors are ignored and bumped by hand.
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      gomod:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    commit-message:
+      # The Go dependency ships in the binary, so a bump is a patch release.
+      prefix: fix(deps)
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    commit-message:
+      prefix: chore(deps)
