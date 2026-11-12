@@ -243,6 +243,42 @@ func TestSelect(t *testing.T) {
 			wantErrs: []string{"TOKEN"},
 		},
 		{
+			name:     "value with tab",
+			item:     item(concealed("f1", "TOKEN", "a\tb")),
+			wantErrs: []string{"TOKEN"},
+		},
+		{
+			name:     "value with ESC",
+			item:     item(concealed("f1", "TOKEN", "a\x1bb")),
+			wantErrs: []string{"TOKEN"},
+		},
+		{
+			name:     "value with DEL",
+			item:     item(concealed("f1", "TOKEN", "a\x7fb")),
+			wantErrs: []string{"TOKEN"},
+		},
+		{
+			name:     "value with NUL",
+			item:     item(concealed("f1", "TOKEN", "a\x00b")),
+			wantErrs: []string{"TOKEN"},
+		},
+		{
+			name:     "value that is not valid UTF-8",
+			item:     item(concealed("f1", "TOKEN", "a\xffb")),
+			wantErrs: []string{"TOKEN"},
+		},
+		{
+			name: "printable values pass",
+			item: item(
+				concealed("f1", "PLAIN", "abc123"),
+				concealed("f2", "SPACES", "two words here"),
+				concealed("f3", "QUOTE", "it's"),
+				concealed("f4", "MULTIBYTE", "日本語 ñ é"),
+				concealed("f5", "SHELL_META", "$x `y` \\ !"),
+			),
+			wantVars: []string{"PLAIN", "SPACES", "QUOTE", "MULTIBYTE", "SHELL_META"},
+		},
+		{
 			name: "all errors returned, not just the first",
 			item: item(
 				concealed("f1", "HOME", "x"),
@@ -300,16 +336,100 @@ func TestSelectErrorsNeverContainValues(t *testing.T) {
 	}
 }
 
+func TestSelectControlByteErrorsNeverContainValues(t *testing.T) {
+	const secret = "s3cr3t-value-xyz"
+	for name, suffix := range map[string]string{
+		"tab": "\t", "ESC": "\x1b", "DEL": "\x7f", "NUL": "\x00", "CR": "\r", "LF": "\n", "invalid utf8": "\xff",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, errs := Select(item(concealed("f1", "TOKEN", secret+suffix+secret)))
+			if len(errs) != 1 {
+				t.Fatalf("errs = %v, want one", errs)
+			}
+			if msg := errs[0].Error(); strings.Contains(msg, secret) || strings.Contains(msg, suffix) {
+				t.Errorf("error leaks value: %q", msg)
+			}
+		})
+	}
+}
+
+func TestCheckValue(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string // exact error text; empty means valid
+	}{
+		{"plain ASCII", "abc123", ""},
+		{"spaces", "two words here", ""},
+		{"single quote", "it's", ""},
+		{"multi-byte UTF-8", "日本語 ñ é", ""},
+		{"shell metacharacters", "$x `y` \\ !", ""},
+		{"first printable byte", " ", ""},
+		{"last printable ASCII byte", "~", ""},
+		{"empty is allowed here", "", ""},
+		{"tab", "a\tb", "contains control byte 0x09"},
+		{"ESC", "a\x1bb", "contains control byte 0x1b"},
+		{"DEL", "a\x7fb", "contains control byte 0x7f"},
+		{"NUL", "a\x00b", "contains control byte 0x00"},
+		{"CR", "a\rb", "contains control byte 0x0d"},
+		{"LF", "a\nb", "contains control byte 0x0a"},
+		{"CRLF names the first", "a\r\nb", "contains control byte 0x0d"},
+		{"unit separator", "a\x1fb", "contains control byte 0x1f"},
+		{"invalid UTF-8", "a\xffb", "is not valid UTF-8"},
+		{"truncated multi-byte", "a\xe6\x97", "is not valid UTF-8"},
+		{"invalid UTF-8 wins over a control byte", "\t\xff", "is not valid UTF-8"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CheckValue(tc.value)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("CheckValue = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("CheckValue = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestQuoteErrorText(t *testing.T) {
+	// Quote reports through CheckValue, so sync and env name a bad value the
+	// same way.
+	for in, want := range map[string]string{
+		"a\tb":    "value contains control byte 0x09",
+		"a\xffb": "value is not valid UTF-8",
+	} {
+		if _, err := Quote(in); err == nil || err.Error() != want {
+			t.Errorf("Quote(%q) error = %v, want %q", in, err, want)
+		}
+	}
+}
+
 func TestSelectErrorText(t *testing.T) {
 	_, errs := Select(item(
 		concealed("f1", "PATH", "x"),
 		concealed("f4", "EMPTY", ""),
 		concealed("f5", "NL", "a\nb"),
+		concealed("f6", "CR", "a\rb"),
+		concealed("f7", "TAB", "a\tb"),
+		concealed("f8", "ESC", "a\x1bb"),
+		concealed("f9", "DEL", "a\x7fb"),
+		concealed("f10", "NUL", "a\x00b"),
+		concealed("f11", "BAD_UTF", "a\xffb"),
 	))
 	want := []string{
 		`item "Grafana" (item-1): label PATH is denylisted`,
 		`item "Grafana" (item-1): EMPTY is empty`,
-		`item "Grafana" (item-1): NL contains a newline`,
+		`item "Grafana" (item-1): NL contains control byte 0x0a`,
+		`item "Grafana" (item-1): CR contains control byte 0x0d`,
+		`item "Grafana" (item-1): TAB contains control byte 0x09`,
+		`item "Grafana" (item-1): ESC contains control byte 0x1b`,
+		`item "Grafana" (item-1): DEL contains control byte 0x7f`,
+		`item "Grafana" (item-1): NUL contains control byte 0x00`,
+		`item "Grafana" (item-1): BAD_UTF is not valid UTF-8`,
 	}
 	if len(errs) != len(want) {
 		t.Fatalf("errs = %v", errs)

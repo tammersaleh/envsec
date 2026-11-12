@@ -151,6 +151,38 @@ func TestEnvRejectsBadValue(t *testing.T) {
 	}
 }
 
+func TestEnvRejectsControlByteValueFromOlderBundle(t *testing.T) {
+	// A release before sync validated control bytes could store such a
+	// value. The bundle still decodes, env unsets that one var, and the rest
+	// export.
+	cases := map[string]struct {
+		value  string
+		reason string
+	}{
+		"tab": {"a\tb", "value contains control byte 0x09"},
+		"ESC": {"a\x1bb", "value contains control byte 0x1b"},
+		"DEL": {"a\x7fb", "value contains control byte 0x7f"},
+		"NUL": {"a\x00b", "value contains control byte 0x00"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := runCLI(t, Deps{Keychain: fakeBundle(t, v("BAD", tc.value), v("GOOD", "g"))}, "env")
+			want := "[[ ${(t)BAD} != *readonly* ]] && builtin unset -- BAD\n" +
+				"[[ ${(t)GOOD} != *readonly* ]] && builtin unset -- GOOD && builtin export -- GOOD='g'\n" +
+				"[[ ${(t)ENVSEC_MANAGED_VARS} != *readonly* ]] && builtin unset -- ENVSEC_MANAGED_VARS && builtin export -- ENVSEC_MANAGED_VARS='GOOD'\n"
+			if r.stdout != want {
+				t.Fatalf("stdout = %q\nwant %q", r.stdout, want)
+			}
+			if r.code != 1 {
+				t.Fatalf("code=%d", r.code)
+			}
+			if r.stderr != "envsec: rejected 1 var(s): BAD ("+tc.reason+")\n" {
+				t.Fatalf("stderr = %q", r.stderr)
+			}
+		})
+	}
+}
+
 func TestEnvRejectsDenylisted(t *testing.T) {
 	r := runCLI(t, Deps{Keychain: fakeBundle(t, v("PATH", "/evil"), v("LC_ALL", "C"), v("OK", "1"))}, "env")
 	want := "[[ ${(t)LC_ALL} != *readonly* ]] && builtin unset -- LC_ALL\n" +

@@ -98,8 +98,8 @@ func (e *SelectError) Error() string {
 
 // Select picks the exportable vars from one in-scope item: every CONCEALED
 // field whose label matches LabelPattern. Fields with other types or labels
-// are ignored. A denylisted label, an empty value, or a value containing CR
-// or LF is an error. A label repeated within the item is not: both vars are
+// are ignored. A denylisted label, an empty value, or a value CheckValue
+// refuses is an error. A label repeated within the item is not: both vars are
 // returned and DetectConflicts reports them. All errors are returned; vars
 // are in field order. Error text never includes a value.
 func Select(item Item) ([]bundle.Var, []*SelectError) {
@@ -112,15 +112,16 @@ func Select(item Item) ([]bundle.Var, []*SelectError) {
 		if f.Type != "CONCEALED" || !LabelPattern.MatchString(f.Label) {
 			continue
 		}
-		switch {
-		case Denied(f.Label):
+		if Denied(f.Label) {
 			fail(f.Label, "label "+f.Label+" is denylisted")
 			continue
-		case f.Value == "":
+		}
+		if f.Value == "" {
 			fail(f.Label, f.Label+" is empty")
 			continue
-		case strings.ContainsAny(f.Value, "\r\n"):
-			fail(f.Label, f.Label+" contains a newline")
+		}
+		if err := CheckValue(f.Value); err != nil {
+			fail(f.Label, f.Label+" "+err.Error())
 			continue
 		}
 		vars = append(vars, bundle.Var{
@@ -229,19 +230,31 @@ func DetectConflicts(vars []bundle.Var) []*ConflictError {
 	return errs
 }
 
-// Quote single-quotes value for zsh; an embedded single quote becomes a
-// closing quote, a backslash-escaped quote, and a reopening quote. Quote
-// rejects invalid UTF-8 and every C0 control byte (0x00-0x1F, including tab,
-// CR, LF, NUL) and DEL (0x7F). Empty is allowed here; Select rejects it.
-// The error never includes the value.
-func Quote(value string) (string, error) {
+// CheckValue is the one rule for what a value may hold, shared by Select
+// (sync, check) and Quote (env): valid UTF-8, no C0 control byte (0x00-0x1F,
+// including tab, CR, LF, NUL), no DEL (0x7F). Empty passes here; Select
+// rejects it separately. The error is a predicate for the caller to prefix
+// with its subject ("contains control byte 0x09", "is not valid UTF-8"). It
+// names the first offending byte and never includes the value.
+func CheckValue(value string) error {
 	if !utf8.ValidString(value) {
-		return "", errors.New("value is not valid UTF-8")
+		return errors.New("is not valid UTF-8")
 	}
 	for i := 0; i < len(value); i++ {
 		if b := value[i]; b < 0x20 || b == 0x7f {
-			return "", fmt.Errorf("value contains control byte 0x%02x", b)
+			return fmt.Errorf("contains control byte 0x%02x", b)
 		}
+	}
+	return nil
+}
+
+// Quote single-quotes value for zsh; an embedded single quote becomes a
+// closing quote, a backslash-escaped quote, and a reopening quote. Quote
+// rejects whatever CheckValue rejects. Empty is allowed here; Select rejects
+// it. The error never includes the value.
+func Quote(value string) (string, error) {
+	if err := CheckValue(value); err != nil {
+		return "", fmt.Errorf("value %w", err)
 	}
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'", nil
 }

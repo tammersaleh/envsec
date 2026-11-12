@@ -544,6 +544,22 @@ func TestDecodeRejectsInvalidUTF8(t *testing.T) {
 	}
 }
 
+func TestGetItemPassesEscapedControlBytesThrough(t *testing.T) {
+	// decode rejects raw invalid UTF-8, but a JSON escape for a control byte
+	// is valid JSON and reaches the caller. export.CheckValue is what stops
+	// it.
+	stdout := `{"id":"x","title":"t","tags":[],"fields":[{"id":"f","type":"CONCEALED","label":"A","value":"a\u0000b\tc\u001bd\u007fe"}]}`
+	run := &cannedRun{stdout: []byte(stdout)}
+	c := New(Options{Runner: run.run})
+	item, err := c.GetItem(context.Background(), acct1, "x")
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if got, want := item.Fields[0].Value, "a\x00b\tc\x1bd\x7fe"; got != want {
+		t.Fatalf("value = %q, want %q", got, want)
+	}
+}
+
 func TestGetItemStrictShape(t *testing.T) {
 	cases := map[string]struct {
 		stdout string

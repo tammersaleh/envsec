@@ -81,6 +81,34 @@ func TestCheckSelectionErrorRow(t *testing.T) {
 	}
 }
 
+func TestCheckControlByteValueIsErrorRow(t *testing.T) {
+	// The values sync refuses are the values env refuses. check reports each
+	// as one error row naming the item and the byte, never the value.
+	cases := map[string]struct {
+		value  string
+		reason string
+	}{
+		"tab":           {"a\tb", "BAD contains control byte 0x09"},
+		"ESC":           {"a\x1bb", "BAD contains control byte 0x1b"},
+		"DEL":           {"a\x7fb", "BAD contains control byte 0x7f"},
+		"NUL":           {"a\x00b", "BAD contains control byte 0x00"},
+		"LF":            {"a\nb", "BAD contains control byte 0x0a"},
+		"invalid UTF-8": {"a\xffb", "BAD is not valid UTF-8"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			kc := fakeBundle(t, sv("ALPHA", "a"))
+			r := runCheck(t, kc, fakeOp(varItem("ALPHA", "a"), varItem("BAD", tc.value)))
+			want := `{"var":"ALPHA","account":"my.1password.com","status":"ok"}` + "\n" +
+				`{"var":"BAD","account":"my.1password.com","status":"error","detail":"item \"Title BAD\" (item-bad): ` + tc.reason + `"}` + "\n" +
+				`{"_meta":{"has_more":false,"error_count":1}}` + "\n"
+			if r.code != 1 || r.stdout != want {
+				t.Fatalf("code=%d stdout=%q\nwant %q", r.code, r.stdout, want)
+			}
+		})
+	}
+}
+
 func TestCheckCachedVarWithEmptySourceIsErrorNotStale(t *testing.T) {
 	// The bundle holds ALPHA; in 1Password its field is now empty. That is a
 	// source validation failure: one error row, and no stale row for the

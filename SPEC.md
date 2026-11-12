@@ -90,7 +90,11 @@ handled by envsec. The v1 cleanup in the private brain plan deletes them by hand
 ### `envsec sync`
 
 For every account: list items tagged `shell-env`, fetch each, select fields.
-Validate every value: nonempty, no CR or LF. Detect conflicts. If anything
+Validate every value: nonempty, valid UTF-8, no C0 control bytes (0x00-0x1F,
+which covers tab, CR, LF, and NUL), no DEL (0x7F). This is the rule `env`
+enforces, so `sync` never stores a value `env` would reject. A rejected value
+is an `error` row naming the item and the reason (the control byte, or that
+the value is not valid UTF-8), never the value. Detect conflicts. If anything
 failed, print the failures and exit 1 with the keychain untouched. Otherwise
 build the new bundle in memory, write it in one keychain replacement. One
 Touch ID prompt per account. Output: one row per var
@@ -169,7 +173,7 @@ never the hint.
 From the Codex review, adopted:
 
 - Assemble all output before writing any of it. Emit the guarded `unset && export` line from "envsec env" for every var.
-- Reject values containing NUL, CR, LF, invalid UTF-8, or other C0/DEL control bytes. A rejected var produces a guarded `builtin unset -- VAR` so a stale inherited value does not survive.
+- Reject values containing NUL, CR, LF, invalid UTF-8, or other C0/DEL control bytes. `sync` applies the same rule, so this fires only for a bundle written by an older release or by hand. A rejected var produces a guarded `builtin unset -- VAR` so a stale inherited value does not survive.
 - Also export `ENVSEC_MANAGED_VARS` (space-separated names). A following run emits a guarded `builtin unset -- VAR` for any inherited name in that list that is no longer managed. `ENVSEC_*` labels are refused at `sync`.
 - The denylist (see "The 1Password contract") is enforced again in `env` on the decoded bundle; a bundle written by a future buggy `sync` must not export `PATH`.
 - Unreadable keychain or bundle (missing item, bad base64, bad JSON, unknown

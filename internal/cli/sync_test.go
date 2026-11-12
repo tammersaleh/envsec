@@ -151,7 +151,19 @@ func TestSyncSelectionErrorsLeaveKeychainUntouched(t *testing.T) {
 		"empty value": {opItem("item-e", "Title E", onepass.Field{ID: "field-e", Type: "CONCEALED", Label: "E"}),
 			`{"var":"E","account":"my.1password.com","status":"error","detail":"item \"Title E\" (item-e): E is empty"}`},
 		"newline": {varItem("NL", "a\nb"),
-			`{"var":"NL","account":"my.1password.com","status":"error","detail":"item \"Title NL\" (item-nl): NL contains a newline"}`},
+			`{"var":"NL","account":"my.1password.com","status":"error","detail":"item \"Title NL\" (item-nl): NL contains control byte 0x0a"}`},
+		"carriage return": {varItem("CR", "a\rb"),
+			`{"var":"CR","account":"my.1password.com","status":"error","detail":"item \"Title CR\" (item-cr): CR contains control byte 0x0d"}`},
+		"tab": {varItem("TAB", "a\tb"),
+			`{"var":"TAB","account":"my.1password.com","status":"error","detail":"item \"Title TAB\" (item-tab): TAB contains control byte 0x09"}`},
+		"ESC": {varItem("ESC", "a\x1bb"),
+			`{"var":"ESC","account":"my.1password.com","status":"error","detail":"item \"Title ESC\" (item-esc): ESC contains control byte 0x1b"}`},
+		"DEL": {varItem("DEL", "a\x7fb"),
+			`{"var":"DEL","account":"my.1password.com","status":"error","detail":"item \"Title DEL\" (item-del): DEL contains control byte 0x7f"}`},
+		"NUL": {varItem("NUL", "a\x00b"),
+			`{"var":"NUL","account":"my.1password.com","status":"error","detail":"item \"Title NUL\" (item-nul): NUL contains control byte 0x00"}`},
+		"invalid UTF-8": {varItem("BAD_UTF", "a\xffb"),
+			`{"var":"BAD_UTF","account":"my.1password.com","status":"error","detail":"item \"Title BAD_UTF\" (item-bad_utf): BAD_UTF is not valid UTF-8"}`},
 		"denylisted BASH_ENV": {varItem("BASH_ENV", "x"),
 			`{"var":"BASH_ENV","account":"my.1password.com","status":"error","detail":"item \"Title BASH_ENV\" (item-bash_env): label BASH_ENV is denylisted"}`},
 		"denylisted MAILPATH": {varItem("MAILPATH", "x"),
@@ -177,6 +189,9 @@ func TestSyncSelectionErrorsLeaveKeychainUntouched(t *testing.T) {
 			}
 			if r.code != 1 || r.stderr != "" || kc.Writes != 0 {
 				t.Fatalf("code=%d stderr=%q writes=%d", r.code, r.stderr, kc.Writes)
+			}
+			if strings.Contains(r.stdout, marker) {
+				t.Fatalf("stdout leaks the value: %q", r.stdout)
 			}
 		})
 	}
