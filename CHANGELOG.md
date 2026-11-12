@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.3](https://github.com/tammersaleh/envsec/compare/v1.0.2...v1.0.3) (2026-11-12)
+
+
+### Bug Fixes
+
+* deny BASH_ENV, MAILPATH, PROMPT_EOL_MARK, and GIT_CONFIG_* ([fbf8e31](https://github.com/tammersaleh/envsec/commit/fbf8e31284e72b46ad47af69f38253985a687188))
+* reject control bytes and invalid UTF-8 at sync, not only at env ([d43b81e](https://github.com/tammersaleh/envsec/commit/d43b81e45d95271e7ff720b621a958bcb372b9a2))
+
 ## [1.0.2](https://github.com/tammersaleh/envsec/compare/v1.0.1...v1.0.2) (2026-11-05)
 
 
