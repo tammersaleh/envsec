@@ -39,8 +39,7 @@ read-only; `OP_*` reconfigures the `op` child `sync` runs; `ZSH_*` is the
 shell's own namespace. `BASH_ENV` is expanded and sourced by every
 non-interactive bash. `GIT_CONFIG_*` (`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`,
 `GIT_CONFIG_VALUE_<n>`, `GIT_CONFIG_PARAMETERS`) injects git config, and keys
-such as `core.fsmonitor` run a command. `BASH_ENV`, `MAILPATH`,
-`PROMPT_EOL_MARK`, and `GIT_CONFIG_` were added 2026-11-12.
+such as `core.fsmonitor` run a command.
 
 Two in-scope fields with the same label are a conflict: two fields in one
 item, two items in one account, or items across accounts. Conflict identity is
