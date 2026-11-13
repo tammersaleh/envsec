@@ -127,7 +127,8 @@ func (c *client) GetItem(ctx context.Context, account Account, id string) (Item,
 	}
 	var w wireItem
 	if err := decode(out, &w); err != nil {
-		return Item{}, fmt.Errorf("op item get: %w", err)
+		// Fixed text. The decoder's error can quote the revealed document.
+		return Item{}, errors.New("op item get: malformed output")
 	}
 	if w.ID != id {
 		return Item{}, fmt.Errorf("op item get: item id mismatch: asked for %s", id)

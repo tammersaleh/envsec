@@ -449,6 +449,49 @@ func TestGetItemCommandErrorRedactsStderr(t *testing.T) {
 	}
 }
 
+// The item is fetched with --reveal, so a decode failure must not carry any
+// of the document. encoding/json errors quote the offending character and
+// name the field path.
+func TestGetItemDecodeErrorHasFixedText(t *testing.T) {
+	// No character of the marker occurs in the fixed error text.
+	const marker = "ZQXJ9876"
+	const want = "op item get: malformed output"
+	prefix := `{"id":"x","title":"t","tags":["shell-env"],"fields":[{"id":"f1","type":"CONCEALED","label":"PIN_CODE","value":`
+	tests := []struct {
+		name   string
+		stdout string
+	}{
+		{"number where a string belongs", prefix + `9876}]}`},
+		{"character after the value", prefix + `"v"` + marker + `}]}`},
+		{"unquoted value", prefix + marker + `}]}`},
+		{"bad escape in the value", prefix + `"\` + marker + `"}]}`},
+		{"truncated inside the value", prefix + `"` + marker},
+		{"not an object", `"` + marker + `"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			run := &cannedRun{stdout: []byte(tt.stdout)}
+			c := New(Options{Runner: run.run})
+			_, err := c.GetItem(context.Background(), acct1, "x")
+			if err == nil {
+				t.Fatal("want error")
+			}
+			if err.Error() != want {
+				t.Errorf("err = %q, want %q", err.Error(), want)
+			}
+			if strings.ContainsAny(err.Error(), marker) {
+				t.Errorf("error carries a character of the document: %q", err.Error())
+			}
+			if strings.Contains(err.Error(), "value") || strings.Contains(err.Error(), "PIN_CODE") {
+				t.Errorf("error names a field: %q", err.Error())
+			}
+			if errors.Unwrap(err) != nil {
+				t.Errorf("error wraps %v", errors.Unwrap(err))
+			}
+		})
+	}
+}
+
 func TestParentCancelIsNotTimeout(t *testing.T) {
 	block := func(ctx context.Context, _ string, _ ...string) ([]byte, []byte, int, error) {
 		<-ctx.Done()
