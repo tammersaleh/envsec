@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.4](https://github.com/tammersaleh/envsec/compare/v1.0.3...v1.0.4) (2026-11-13)
+
+
+### Bug Fixes
+
+* **deps:** bump github.com/alecthomas/kong ([#5](https://github.com/tammersaleh/envsec/issues/5)) ([da3aa4c](https://github.com/tammersaleh/envsec/commit/da3aa4ce3d9ac6c0ff9c4bde06609c6252941e14))
+* item get decode errors no longer quote the response ([6266fbb](https://github.com/tammersaleh/envsec/commit/6266fbbd5c7432a8b8917fc1912c43b91a7da92f))
+
 ## [1.0.3](https://github.com/tammersaleh/envsec/compare/v1.0.2...v1.0.3) (2026-11-12)
 
 
