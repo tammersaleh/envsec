@@ -46,6 +46,9 @@ func (EnvCmd) Run(rc *runContext) error {
 			reason = "invalid name"
 		case export.Denied(v.Name):
 			reason = "denylisted"
+		case v.Value == "":
+			// Quote allows empty for the sentinel. A var may not be.
+			reason = "value is empty"
 		default:
 			var qerr error
 			if quoted, qerr = export.Quote(v.Value); qerr != nil {

@@ -230,6 +230,22 @@ func TestEnvRejectsBadValue(t *testing.T) {
 	}
 }
 
+// TestEnvRejectsEmptyValue: sync never stores an empty value, so one in the
+// bundle was written by hand or by an older release. It is rejected like
+// any other bad value.
+func TestEnvRejectsEmptyValue(t *testing.T) {
+	r := runCLI(t, Deps{Keychain: fakeBundle(t, v("EMPTY", ""), v("GOOD", "g"))}, "env")
+	want := "[[ ${(t)EMPTY} != *readonly* ]] && builtin unset -- EMPTY\n" +
+		"[[ ${(t)GOOD} != *readonly* ]] && builtin unset -- GOOD && builtin export -- GOOD='g'\n" +
+		"[[ ${(t)ENVSEC_MANAGED_VARS} != *readonly* ]] && builtin unset -- ENVSEC_MANAGED_VARS && builtin export -- ENVSEC_MANAGED_VARS='GOOD'\n"
+	if r.stdout != want {
+		t.Fatalf("stdout = %q\nwant %q", r.stdout, want)
+	}
+	if r.code != 1 || r.stderr != "envsec: rejected 1 var(s): EMPTY (value is empty)\n" {
+		t.Fatalf("code=%d stderr=%q", r.code, r.stderr)
+	}
+}
+
 func TestEnvRejectsControlByteValueFromOlderBundle(t *testing.T) {
 	// A release before sync validated control bytes could store such a
 	// value. The bundle still decodes, env unsets that one var, and the rest
