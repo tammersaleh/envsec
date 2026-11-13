@@ -8,6 +8,9 @@ updates:
       interval: monthly
     cooldown:
       default-days: 7
+    # Direct requirements only. The indirect ones belong to huh and move with it.
+    allow:
+      - dependency-type: direct
     groups:
       gomod:
         patterns: ["*"]
@@ -15,6 +18,8 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
+      # Locked. The trust picker handles terminal input. Bump by hand.
+      - dependency-name: "charm.land/huh/v2"
     commit-message:
       # The Go dependency ships in the binary, so a bump is a patch release.
       prefix: fix(deps)

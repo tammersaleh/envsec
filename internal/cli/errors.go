@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -82,6 +83,9 @@ func asExit(err error) *ExitError {
 	if errors.Is(err, keychain.ErrNotFound) {
 		return &ExitError{Code: ExitKeychain, Err: "bundle_missing", Detail: "no envsec bundle in the keychain", Hint: hintSync}
 	}
+	if errors.Is(err, bundle.ErrLegacySchema) {
+		return &ExitError{Code: ExitKeychain, Err: "bundle_untrusted", Detail: err.Error(), Hint: hintSync}
+	}
 	if errors.Is(err, bundle.ErrBadBase64) || errors.Is(err, bundle.ErrBadJSON) || errors.Is(err, bundle.ErrUnknownSchema) {
 		return &ExitError{Code: ExitKeychain, Err: "bundle_invalid", Detail: err.Error(), Hint: hintSync}
 	}
@@ -95,11 +99,15 @@ type fatalJSON struct {
 	Hint   string `json:"hint"`
 }
 
-// writeFatal prints the single JSON object for a fatal error.
+// writeFatal prints the single JSON object for a fatal error. HTML escaping
+// is off so a hint such as `envsec trust <source-id>` reads as written.
+// Control characters are still escaped.
 func writeFatal(w io.Writer, e *ExitError) {
-	raw, err := json.Marshal(fatalJSON{Error: e.Err, Detail: e.Detail, Hint: e.Hint})
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(fatalJSON{Error: e.Err, Detail: e.Detail, Hint: e.Hint}); err != nil {
 		return
 	}
-	_, _ = w.Write(append(raw, '\n'))
+	_, _ = w.Write(buf.Bytes())
 }

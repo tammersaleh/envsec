@@ -147,6 +147,8 @@ func item(fields ...Field) Item {
 	return Item{
 		ID:          "item-1",
 		Title:       "Grafana",
+		VaultID:     "vault-1",
+		VaultName:   "Private",
 		AccountUUID: "acct-1",
 		UserUUID:    "user-1",
 		AccountURL:  "my.1password.com",
@@ -295,7 +297,7 @@ func TestSelect(t *testing.T) {
 			vars, errs := Select(tc.item)
 			var names []string
 			for _, v := range vars {
-				names = append(names, v.Name)
+				names = append(names, v.Source.Name)
 			}
 			if !reflect.DeepEqual(names, tc.wantVars) {
 				t.Errorf("vars = %v, want %v", names, tc.wantVars)
@@ -311,7 +313,7 @@ func TestSelect(t *testing.T) {
 				if !strings.Contains(msg, tc.item.Title) || !strings.Contains(msg, tc.item.ID) {
 					t.Errorf("error %d = %q, want item title and ID", i, msg)
 				}
-				if errs[i].Label != want || errs[i].ItemID != tc.item.ID || errs[i].ItemTitle != tc.item.Title || errs[i].Reason == "" {
+				if errs[i].Source.Name != want || errs[i].Source.ItemID != tc.item.ID || errs[i].ItemTitle != tc.item.Title || errs[i].Reason == "" {
 					t.Errorf("error %d fields = %+v, want label %q", i, errs[i], want)
 				}
 			}
@@ -399,7 +401,7 @@ func TestQuoteErrorText(t *testing.T) {
 	// Quote reports through CheckValue, so sync and env name a bad value the
 	// same way.
 	for in, want := range map[string]string{
-		"a\tb":    "value contains control byte 0x09",
+		"a\tb":   "value contains control byte 0x09",
 		"a\xffb": "value is not valid UTF-8",
 	} {
 		if _, err := Quote(in); err == nil || err.Error() != want {
@@ -447,19 +449,76 @@ func TestSelectErrorText(t *testing.T) {
 }
 
 func TestSelectProvenance(t *testing.T) {
-	it := item(concealed("f9", "TOKEN", "v"))
-	vars, errs := Select(it)
-	if len(errs) != 0 {
-		t.Fatal(errs)
+	// A candidate and a problem from one item carry the same full tuple and
+	// display strings, differing only in field id and label.
+	it := item(concealed("f9", "TOKEN", "v"), concealed("f10", "PATH", "p"))
+	cands, errs := Select(it)
+	origin := func(field, name string) Origin {
+		return Origin{
+			Source: bundle.Source{
+				AccountUUID: "acct-1", UserUUID: "user-1", VaultID: "vault-1",
+				ItemID: "item-1", FieldID: field, Name: name,
+			},
+			AccountURL: "my.1password.com", VaultName: "Private", ItemTitle: "Grafana",
+		}
 	}
-	want := []bundle.Var{{
+	if want := []Candidate{{Origin: origin("f9", "TOKEN"), Value: "v"}}; !reflect.DeepEqual(cands, want) {
+		t.Errorf("candidates = %+v, want %+v", cands, want)
+	}
+	if len(errs) != 1 || errs[0].Origin != origin("f10", "PATH") {
+		t.Fatalf("errs = %+v", errs)
+	}
+	wantVar := bundle.Var{
 		Name: "TOKEN", Value: "v",
 		AccountUUID: "acct-1", UserUUID: "user-1", AccountURL: "my.1password.com",
-		ItemID: "item-1", FieldID: "f9",
-	}}
-	if !reflect.DeepEqual(vars, want) {
-		t.Errorf("vars = %+v, want %+v", vars, want)
+		VaultID: "vault-1", ItemID: "item-1", FieldID: "f9",
 	}
+	if got := cands[0].Var(); got != wantVar || got.Source() != cands[0].Source {
+		t.Errorf("Var() = %+v, want %+v", got, wantVar)
+	}
+}
+
+func TestSelectRefusesAnIncompleteSource(t *testing.T) {
+	// A source with an empty part could never be trusted or stored.
+	tests := map[string]struct {
+		mut  func(*Item)
+		want string
+	}{
+		"account": {func(i *Item) { i.AccountUUID = "" }, `item "Grafana" (item-1): TOKEN has no account UUID`},
+		"user":    {func(i *Item) { i.UserUUID = "" }, `item "Grafana" (item-1): TOKEN has no user UUID`},
+		"vault":   {func(i *Item) { i.VaultID = "" }, `item "Grafana" (item-1): TOKEN has no vault ID`},
+		"item":    {func(i *Item) { i.ID = "" }, `item "Grafana" (): TOKEN has no item ID`},
+		"field":   {func(i *Item) { i.Fields[0].ID = "" }, `item "Grafana" (item-1): TOKEN has no field ID`},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			it := item(concealed("f1", "TOKEN", "s3cr3t"))
+			tc.mut(&it)
+			cands, errs := Select(it)
+			if len(cands) != 0 || len(errs) != 1 {
+				t.Fatalf("candidates = %d, errs = %v", len(cands), errs)
+			}
+			if got := errs[0].Error(); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+	// Display strings are not identity and may be empty.
+	it := item(concealed("f1", "TOKEN", "s3cr3t"))
+	it.VaultName, it.Title = "", ""
+	if cands, errs := Select(it); len(cands) != 1 || len(errs) != 0 {
+		t.Errorf("empty display strings refused: %v", errs)
+	}
+}
+
+// cands wraps vars as candidates, for the tests that only care about
+// identity.
+func cands(vars ...bundle.Var) []Candidate {
+	out := make([]Candidate, len(vars))
+	for i, v := range vars {
+		out[i] = Candidate{Origin: Origin{Source: v.Source(), AccountURL: v.AccountURL}, Value: v.Value}
+	}
+	return out
 }
 
 func TestDetectConflicts(t *testing.T) {
@@ -499,7 +558,7 @@ func TestDetectConflicts(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			errs := DetectConflicts(tc.vars)
+			errs := DetectConflicts(cands(tc.vars...))
 			if len(errs) != len(tc.want) {
 				t.Fatalf("errs = %v, want %d", errs, len(tc.want))
 			}
@@ -528,7 +587,7 @@ func TestDetectConflictsSameItemTwoFieldsIsConflict(t *testing.T) {
 		{Name: "T", AccountUUID: "a", UserUUID: "u", AccountURL: "my.1password.com", ItemID: "i1", FieldID: "f2"},
 		{Name: "T", AccountUUID: "a", UserUUID: "u", AccountURL: "my.1password.com", ItemID: "i1", FieldID: "f1"},
 	}
-	errs := DetectConflicts(vars)
+	errs := DetectConflicts(cands(vars...))
 	if len(errs) != 1 || len(errs[0].Sources) != 2 {
 		t.Fatalf("errs = %v, want one conflict with two sources", errs)
 	}
@@ -545,7 +604,7 @@ func TestDetectConflictsSameSourceDifferentURLIsNotConflict(t *testing.T) {
 		{Name: "T", AccountUUID: "a", UserUUID: "u", AccountURL: "my.1password.com", ItemID: "i1", FieldID: "f1"},
 		{Name: "T", AccountUUID: "a", UserUUID: "u", AccountURL: "my.ent.1password.com", ItemID: "i1", FieldID: "f1"},
 	}
-	if errs := DetectConflicts(vars); len(errs) != 0 {
+	if errs := DetectConflicts(cands(vars...)); len(errs) != 0 {
 		t.Fatalf("errs = %v, want none", errs)
 	}
 }
@@ -557,7 +616,7 @@ func TestDetectConflictsKeyedByIdentityNotURL(t *testing.T) {
 		{Name: "T", AccountUUID: "a", UserUUID: "u1", AccountURL: "my.1password.com", ItemID: "i1", FieldID: "f"},
 		{Name: "T", AccountUUID: "a", UserUUID: "u2", AccountURL: "my.1password.com", ItemID: "i1", FieldID: "f"},
 	}
-	errs := DetectConflicts(vars)
+	errs := DetectConflicts(cands(vars...))
 	if len(errs) != 1 {
 		t.Fatalf("errs = %v, want one conflict", errs)
 	}
@@ -578,14 +637,229 @@ func TestDetectConflictsDeterministicOrder(t *testing.T) {
 		{Name: "T", ItemID: "i1", AccountURL: "a"},
 		{Name: "T", ItemID: "i2", AccountURL: "b"},
 	}
-	first := DetectConflicts(vars)[0].Error()
+	first := DetectConflicts(cands(vars...))[0].Error()
 	for range 20 {
-		if got := DetectConflicts(vars)[0].Error(); got != first {
+		if got := DetectConflicts(cands(vars...))[0].Error(); got != first {
 			t.Fatalf("nondeterministic: %q vs %q", got, first)
 		}
 	}
 	if i1, i2, i3 := strings.Index(first, "i1"), strings.Index(first, "i2"), strings.Index(first, "i3"); i1 >= i2 || i2 >= i3 {
 		t.Errorf("sources not sorted: %q", first)
+	}
+}
+
+func TestDetectConflictsIgnoresTheVault(t *testing.T) {
+	// Conflict identity is (account, user, item, field). The vault is not
+	// part of it.
+	vars := []bundle.Var{
+		{Name: "T", AccountUUID: "a", UserUUID: "u", AccountURL: "my.1password.com", VaultID: "v1", ItemID: "i1", FieldID: "f1"},
+		{Name: "T", AccountUUID: "a", UserUUID: "u", AccountURL: "my.1password.com", VaultID: "v2", ItemID: "i1", FieldID: "f1"},
+	}
+	if errs := DetectConflicts(cands(vars...)); len(errs) != 0 {
+		t.Fatalf("errs = %v, want none", errs)
+	}
+}
+
+// cand builds a complete candidate. item doubles as the account suffix so
+// two calls with different items are different sources.
+func cand(name, item string) Candidate {
+	return Candidate{
+		Origin: Origin{
+			Source: bundle.Source{
+				AccountUUID: "acct", UserUUID: "user", VaultID: "vault",
+				ItemID: item, FieldID: "field-" + name, Name: name,
+			},
+			AccountURL: "my.1password.com", VaultName: "Private", ItemTitle: "Title " + item,
+		},
+		Value: "s3cr3t-" + name + "-" + item,
+	}
+}
+
+func prob(name, item, reason string) *SelectError {
+	return &SelectError{Origin: cand(name, item).Origin, Reason: reason}
+}
+
+// names renders candidates as "NAME@item" so failures never print a value.
+func names(cs []Candidate) []string {
+	var out []string
+	for _, c := range cs {
+		out = append(out, c.Source.Name+"@"+c.Source.ItemID)
+	}
+	return out
+}
+
+func probNames(es []*SelectError) []string {
+	var out []string
+	for _, e := range es {
+		out = append(out, e.Source.Name+"@"+e.Source.ItemID)
+	}
+	return out
+}
+
+func conflictNames(es []*ConflictError) []string {
+	var out []string
+	for _, e := range es {
+		out = append(out, e.Name)
+	}
+	return out
+}
+
+func TestSplit(t *testing.T) {
+	src := func(name, item string) bundle.Source { return cand(name, item).Source }
+	tests := []struct {
+		name      string
+		cands     []Candidate
+		problems  []*SelectError
+		trusted   []bundle.Source
+		trustedC  []string
+		untrusted []string
+		trustedP  []string
+		untrustP  []string
+		conflicts []string
+		fatal     bool
+	}{
+		{name: "nothing"},
+		{
+			name:      "no trust: everything is untrusted, nothing is fatal",
+			cands:     []Candidate{cand("A", "i1"), cand("B", "i1")},
+			problems:  []*SelectError{prob("PATH", "i1", "label PATH is denylisted")},
+			untrusted: []string{"A@i1", "B@i1"},
+			untrustP:  []string{"PATH@i1"},
+		},
+		{
+			name:      "split keeps input order",
+			cands:     []Candidate{cand("C", "i1"), cand("A", "i1"), cand("B", "i1"), cand("D", "i1")},
+			trusted:   []bundle.Source{src("D", "i1"), src("C", "i1")},
+			trustedC:  []string{"C@i1", "D@i1"},
+			untrusted: []string{"A@i1", "B@i1"},
+		},
+		{
+			name:      "an untrusted source sharing a trusted name is untrusted, not a conflict",
+			cands:     []Candidate{cand("TOKEN", "i1"), cand("TOKEN", "i2")},
+			trusted:   []bundle.Source{src("TOKEN", "i1")},
+			trustedC:  []string{"TOKEN@i1"},
+			untrusted: []string{"TOKEN@i2"},
+		},
+		{
+			name:      "two untrusted sources with one name are both untrusted",
+			cands:     []Candidate{cand("TOKEN", "i1"), cand("TOKEN", "i2")},
+			untrusted: []string{"TOKEN@i1", "TOKEN@i2"},
+		},
+		{
+			name:      "two trusted sources with one name conflict",
+			cands:     []Candidate{cand("TOKEN", "i1"), cand("TOKEN", "i2"), cand("TOKEN", "i3"), cand("OK", "i1")},
+			trusted:   []bundle.Source{src("TOKEN", "i1"), src("TOKEN", "i2"), src("OK", "i1")},
+			trustedC:  []string{"TOKEN@i1", "TOKEN@i2", "OK@i1"},
+			untrusted: []string{"TOKEN@i3"},
+			conflicts: []string{"TOKEN"},
+			fatal:     true,
+		},
+		{
+			name:     "a problem on a trusted source is fatal",
+			cands:    []Candidate{cand("OK", "i1")},
+			problems: []*SelectError{prob("TOKEN", "i1", "TOKEN is empty"), prob("PATH", "i2", "label PATH is denylisted")},
+			trusted:  []bundle.Source{src("OK", "i1"), src("TOKEN", "i1")},
+			trustedC: []string{"OK@i1"},
+			trustedP: []string{"TOKEN@i1"},
+			untrustP: []string{"PATH@i2"},
+			fatal:    true,
+		},
+		{
+			name:     "a problem on an untrusted source sharing a trusted name is not fatal",
+			cands:    []Candidate{cand("TOKEN", "i1")},
+			problems: []*SelectError{prob("TOKEN", "i2", "TOKEN is empty")},
+			trusted:  []bundle.Source{src("TOKEN", "i1")},
+			trustedC: []string{"TOKEN@i1"},
+			untrustP: []string{"TOKEN@i2"},
+		},
+		{
+			name:     "a trusted source absent from the resolution yields nothing",
+			cands:    []Candidate{cand("A", "i1")},
+			trusted:  []bundle.Source{src("GONE", "i9"), src("A", "i1")},
+			trustedC: []string{"A@i1"},
+		},
+		{
+			name:      "the same source twice is kept once",
+			cands:     []Candidate{cand("A", "i1"), cand("A", "i1"), cand("B", "i1"), cand("B", "i1")},
+			problems:  []*SelectError{prob("E", "i1", "E is empty"), prob("E", "i1", "E is empty")},
+			trusted:   []bundle.Source{src("A", "i1")},
+			trustedC:  []string{"A@i1"},
+			untrusted: []string{"B@i1"},
+			untrustP:  []string{"E@i1"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := Split(tc.cands, tc.problems, tc.trusted)
+			for what, pair := range map[string][2][]string{
+				"trusted":            {names(p.Trusted), tc.trustedC},
+				"untrusted":          {names(p.Untrusted), tc.untrusted},
+				"trusted problems":   {probNames(p.TrustedProblems), tc.trustedP},
+				"untrusted problems": {probNames(p.UntrustedProblems), tc.untrustP},
+				"conflicts":          {conflictNames(p.Conflicts), tc.conflicts},
+			} {
+				if !reflect.DeepEqual(pair[0], pair[1]) {
+					t.Errorf("%s = %v, want %v", what, pair[0], pair[1])
+				}
+			}
+			if p.Fatal() != tc.fatal {
+				t.Errorf("Fatal() = %v, want %v", p.Fatal(), tc.fatal)
+			}
+		})
+	}
+}
+
+func TestSplitMatchesTheWholeTuple(t *testing.T) {
+	c := cand("TOKEN", "i1")
+	muts := map[string]func(*bundle.Source){
+		"account": func(s *bundle.Source) { s.AccountUUID = "x" },
+		"user":    func(s *bundle.Source) { s.UserUUID = "x" },
+		"vault":   func(s *bundle.Source) { s.VaultID = "x" },
+		"item":    func(s *bundle.Source) { s.ItemID = "x" },
+		"field":   func(s *bundle.Source) { s.FieldID = "x" },
+		"name":    func(s *bundle.Source) { s.Name = "x" },
+	}
+	for name, mut := range muts {
+		s := c.Source
+		mut(&s)
+		p := Split([]Candidate{c}, []*SelectError{{Origin: c.Origin, Reason: "r"}}, []bundle.Source{s})
+		if len(p.Trusted) != 0 || len(p.Untrusted) != 1 || len(p.TrustedProblems) != 0 || len(p.UntrustedProblems) != 1 {
+			t.Errorf("trust that differs in %s still matched", name)
+		}
+	}
+	// Display strings are not identity.
+	moved := c
+	moved.AccountURL, moved.VaultName, moved.ItemTitle = "other.1password.com", "Renamed", "Renamed"
+	if p := Split([]Candidate{moved}, nil, []bundle.Source{c.Source}); len(p.Trusted) != 1 {
+		t.Error("a renamed vault, item, or URL lost trust")
+	}
+}
+
+func TestSplitKeepsOneSourceListedUnderTwoURLs(t *testing.T) {
+	// One field listed under two account URLs is one source: the tuples are
+	// equal, so it is kept once and never conflicts with itself.
+	a := cand("TOKEN", "i1")
+	b := a
+	b.AccountURL = "my.ent.1password.com"
+	p := Split([]Candidate{a, b}, nil, []bundle.Source{a.Source})
+	if len(p.Trusted) != 1 || p.Trusted[0].AccountURL != "my.1password.com" || p.Fatal() {
+		t.Errorf("trusted = %v, conflicts = %v", names(p.Trusted), conflictNames(p.Conflicts))
+	}
+}
+
+func TestPartitionVars(t *testing.T) {
+	a, b := cand("A", "i1"), cand("B", "i2")
+	p := Split([]Candidate{a, b, cand("C", "i3")}, nil, []bundle.Source{b.Source, a.Source})
+	got := p.Vars()
+	if len(got) != 2 || got[0] != a.Var() || got[1] != b.Var() {
+		t.Errorf("Vars() names = %v", names(p.Trusted))
+	}
+	// The result must be a bundle the encoder accepts.
+	if _, err := bundle.Encode(bundle.Bundle{GeneratedAt: time.Unix(1, 0), TrustedSources: []bundle.Source{a.Source, b.Source}, Vars: got}); err != nil {
+		t.Errorf("Encode: %v", err)
+	}
+	if vars := (Partition{}).Vars(); vars == nil || len(vars) != 0 {
+		t.Errorf("empty Vars() = %#v, want empty and non-nil", vars)
 	}
 }
 

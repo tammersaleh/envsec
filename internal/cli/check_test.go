@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tammersaleh/envsec/internal/bundle"
 	"github.com/tammersaleh/envsec/internal/keychain"
 	"github.com/tammersaleh/envsec/internal/onepass"
 )
@@ -31,32 +32,85 @@ func TestCheckAllOK(t *testing.T) {
 }
 
 func TestCheckStatuses(t *testing.T) {
-	kc := fakeBundle(t, sv("SAME", "s"), sv("DIFF", "old"), sv("STALE", "x"))
-	r := runCheck(t, kc, fakeOp(varItem("SAME", "s"), varItem("DIFF", "new"), varItem("NEW", "n")))
-	want := `{"var":"DIFF","account":"my.1password.com","status":"different"}` + "\n" +
-		`{"var":"NEW","account":"my.1password.com","status":"missing"}` + "\n" +
-		`{"var":"SAME","account":"my.1password.com","status":"ok"}` + "\n" +
-		`{"var":"STALE","account":"my.1password.com","status":"stale"}` + "\n" +
-		`{"_meta":{"has_more":false,"error_count":3}}` + "\n"
+	// BACK is trusted with no var: it left 1Password and has returned.
+	kc := fakeTrusting(t, []bundle.Source{src("BACK")}, sv("SAME", "s"), sv("DIFF", "old"), sv("STALE", "x"))
+	r := runCheck(t, kc, fakeOp(varItem("SAME", "s"), varItem("DIFF", "new"), varItem("BACK", "b"), varItem("NEW", "n")))
+	want := row("BACK", "missing") + row("DIFF", "different") + untrustedRow("NEW") + row("SAME", "ok") + row("STALE", "stale") + trailer(4)
 	if r.code != 1 || r.stdout != want || r.stderr != "" {
 		t.Fatalf("code=%d stdout=%q stderr=%q\nwant %q", r.code, r.stdout, r.stderr, want)
 	}
 }
 
-func TestCheckProvenanceChangeIsDifferent(t *testing.T) {
+// TestCheckProvenanceChangeIsUntrusted: a moved field is a new source. The
+// cached copy is not also reported stale.
+func TestCheckProvenanceChangeIsUntrusted(t *testing.T) {
 	kc := fakeBundle(t, sv("ALPHA", "a"))
 	moved := varItem("ALPHA", "a")
 	moved.ID = "item-alpha-moved"
 	r := runCheck(t, kc, fakeOp(moved))
-	want := `{"var":"ALPHA","account":"my.1password.com","status":"different"}` + "\n" +
-		`{"_meta":{"has_more":false,"error_count":1}}` + "\n"
+	movedSrc := src("ALPHA")
+	movedSrc.ItemID = "item-alpha-moved"
+	want := `{"var":"ALPHA","account":"my.1password.com","vault":"Private","vault_id":"vault","item":"Title ALPHA","item_id":"item-alpha-moved","field_id":"field-alpha","source_id":"` + movedSrc.ID() + `","status":"untrusted","detail":"source is not trusted"}` + "\n" + trailer(1)
 	if r.code != 1 || r.stdout != want {
-		t.Fatalf("code=%d stdout=%q", r.code, r.stdout)
+		t.Fatalf("code=%d stdout=%q\nwant %q", r.code, r.stdout, want)
+	}
+}
+
+func TestCheckAccountURLChangeIsDifferent(t *testing.T) {
+	kc := fakeBundle(t, sv("ALPHA", "a"))
+	renamed := acct1
+	renamed.URL = "renamed.1password.com"
+	op := &onepass.Fake{AccountList: []onepass.Account{renamed}, Items: map[string][]onepass.Item{acct1.AccountUUID: {varItem("ALPHA", "a")}}}
+	r := runCheck(t, kc, op)
+	want := `{"var":"ALPHA","account":"renamed.1password.com","status":"different"}` + "\n" + trailer(1)
+	if r.code != 1 || r.stdout != want {
+		t.Fatalf("code=%d stdout=%q\nwant %q", r.code, r.stdout, want)
+	}
+}
+
+// TestCheckUntrustedSourceWithATrustedName: not a conflict. The name gets
+// one untrusted row and is left out of the comparison.
+func TestCheckUntrustedSourceWithATrustedName(t *testing.T) {
+	kc := fakeBundle(t, sv("TOKEN", "one"))
+	r := runCheck(t, kc, twoAccountOp())
+	planted := src2("item-token2", "TOKEN")
+	want := `{"var":"TOKEN","account":"other.1password.com","vault":"Private","vault_id":"vault","item":"Other token","item_id":"item-token2","field_id":"field-token","source_id":"` + planted.ID() + `","status":"untrusted","detail":"source is not trusted"}` + "\n" + trailer(1)
+	if r.code != 1 || r.stdout != want {
+		t.Fatalf("code=%d stdout=%q\nwant %q", r.code, r.stdout, want)
+	}
+}
+
+// TestCheckErrorWinsOverUntrusted: TOKEN has a valid untrusted source and an
+// invalid one.
+func TestCheckErrorWinsOverUntrusted(t *testing.T) {
+	kc := fakeBundle(t, sv("ALPHA", "a"))
+	empty := opItem("item-empty", "Empty", onepass.Field{ID: "field-token-e", Type: "CONCEALED", Label: "TOKEN"})
+	r := runCheck(t, kc, fakeOp(varItem("ALPHA", "a"), varItem("TOKEN", "t"), empty))
+	want := row("ALPHA", "ok") +
+		`{"var":"TOKEN","account":"my.1password.com","status":"error","detail":"item \"Empty\" (item-empty): TOKEN is empty; ` + multiDetail(src("TOKEN"), "is not trusted") + `"}` + "\n" + trailer(1)
+	if r.code != 1 || r.stdout != want {
+		t.Fatalf("code=%d stdout=%q\nwant %q", r.code, r.stdout, want)
+	}
+}
+
+// TestCheckConflictWinsOverUntrusted: two trusted sources and a third,
+// untrusted one, all named TOKEN.
+func TestCheckConflictWinsOverUntrusted(t *testing.T) {
+	kc := fakeTrusting(t, []bundle.Source{src2("item-token2", "TOKEN")}, sv("TOKEN", "one"))
+	op := twoAccountOp()
+	third := opItem("item-third", "Third", secret("TOKEN", "three"))
+	op.Items[acct1.AccountUUID] = append(op.Items[acct1.AccountUUID], third)
+	thirdSrc := src("TOKEN")
+	thirdSrc.ItemID = "item-third"
+	r := runCheck(t, kc, op)
+	want := `{"var":"TOKEN","account":"","status":"conflict","detail":"conflict: TOKEN is defined by item item-token (my.1password.com) and item item-token2 (other.1password.com); ` + multiDetail(thirdSrc, "is not trusted") + `"}` + "\n" + trailer(1)
+	if r.code != 1 || r.stdout != want {
+		t.Fatalf("code=%d stdout=%q\nwant %q", r.code, r.stdout, want)
 	}
 }
 
 func TestCheckConflictRows(t *testing.T) {
-	kc := fakeBundle(t, sv("TOKEN", "one"), sv("ALPHA", "a"))
+	kc := fakeTrusting(t, []bundle.Source{src2("item-token2", "TOKEN")}, sv("TOKEN", "one"), sv("ALPHA", "a"))
 	op := twoAccountOp()
 	op.Items[acct1.AccountUUID] = append(op.Items[acct1.AccountUUID], varItem("ALPHA", "a"))
 	r := runCheck(t, kc, op)
@@ -124,7 +178,10 @@ func TestCheckCachedVarWithEmptySourceIsErrorNotStale(t *testing.T) {
 }
 
 func TestCheckSameLabelTwiceInOneItemIsOneConflictRow(t *testing.T) {
-	kc := fakeBundle(t, sv("TOKEN", "one"))
+	first := bundle.Source{AccountUUID: "ACCT", UserUUID: "USER", VaultID: "vault", ItemID: "item-twice", FieldID: "field-token", Name: "TOKEN"}
+	second := first
+	second.FieldID = "field-token-2"
+	kc := fakeTrusting(t, []bundle.Source{first, second})
 	twice := opItem("item-twice", "Twice", secret("TOKEN", "one"), onepass.Field{ID: "field-token-2", Type: "CONCEALED", Label: "TOKEN", Value: marker + "-two"})
 	r := runCheck(t, kc, fakeOp(twice))
 	want := `{"var":"TOKEN","account":"","status":"conflict","detail":"conflict: TOKEN is defined by item item-twice field field-token (my.1password.com) and item item-twice field field-token-2 (my.1password.com)"}` + "\n" +
@@ -165,7 +222,7 @@ func TestCheckRepeatedInvalidLabelIsOneRow(t *testing.T) {
 func TestCheckConflictWinsOverError(t *testing.T) {
 	// TOKEN is valid in two items (conflict) and empty in a third (error):
 	// one row, status conflict, both details.
-	kc := fakeBundle(t, sv("TOKEN", "one"))
+	kc := fakeTrusting(t, []bundle.Source{src2("item-token2", "TOKEN")}, sv("TOKEN", "one"))
 	op := twoAccountOp()
 	empty := opItem("item-empty", "Empty", onepass.Field{ID: "field-token-e", Type: "CONCEALED", Label: "TOKEN"})
 	op.Items[acct1.AccountUUID] = append(op.Items[acct1.AccountUUID], empty)
@@ -177,13 +234,33 @@ func TestCheckConflictWinsOverError(t *testing.T) {
 	}
 }
 
-func TestCheckBundleMissingIsAllMissing(t *testing.T) {
-	kc := &keychain.Fake{}
+// TestCheckNothingTrustedIsAllUntrusted: with no bundle, an empty one, or a
+// schema 1 bundle, every valid source is untrusted.
+func TestCheckNothingTrustedIsAllUntrusted(t *testing.T) {
+	for name, kc := range map[string]*keychain.Fake{
+		"no bundle":     {},
+		"empty bundle":  fakeBundle(t),
+		"legacy bundle": legacyBundle(t, sv("ALPHA", "a")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := runCheck(t, kc, fakeOp(varItem("ALPHA", "a"), varItem("PATH", "p")))
+			want := untrustedRow("ALPHA") +
+				`{"var":"PATH","account":"my.1password.com","status":"error","detail":"item \"Title PATH\" (item-path): label PATH is denylisted"}` + "\n" + trailer(2)
+			if r.code != 1 || r.stdout != want || r.stderr != "" {
+				t.Fatalf("code=%d stdout=%q stderr=%q\nwant %q", r.code, r.stdout, r.stderr, want)
+			}
+		})
+	}
+}
+
+// TestCheckLegacyVarGoneFrom1PasswordIsStale: a schema 1 bundle is still
+// compared, so a var with no source left shows up.
+func TestCheckLegacyVarGoneFrom1PasswordIsStale(t *testing.T) {
+	kc := legacyBundle(t, sv("ALPHA", "a"), sv("OLD", "o"))
 	r := runCheck(t, kc, fakeOp(varItem("ALPHA", "a")))
-	want := `{"var":"ALPHA","account":"my.1password.com","status":"missing"}` + "\n" +
-		`{"_meta":{"has_more":false,"error_count":1}}` + "\n"
-	if r.code != 1 || r.stdout != want || r.stderr != "" {
-		t.Fatalf("code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
+	want := untrustedRow("ALPHA") + row("OLD", "stale") + trailer(2)
+	if r.code != 1 || r.stdout != want {
+		t.Fatalf("code=%d stdout=%q\nwant %q", r.code, r.stdout, want)
 	}
 }
 

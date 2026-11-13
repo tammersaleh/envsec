@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/tammersaleh/envsec/internal/bundle"
 	"github.com/tammersaleh/envsec/internal/keychain"
 	"github.com/tammersaleh/envsec/internal/onepass"
+	"github.com/tammersaleh/envsec/internal/trustpicker"
 )
 
 // Every fake secret carries this marker so tests can assert that no output
@@ -90,9 +93,69 @@ func decodeFake(t *testing.T, kc *keychain.Fake) bundle.Bundle {
 
 const trailerOK = `{"_meta":{"has_more":false,"error_count":0}}` + "\n"
 
+func trailer(n int) string {
+	return fmt.Sprintf(`{"_meta":{"has_more":false,"error_count":%d}}`, n) + "\n"
+}
+
+// row is a diff or compare row for a var under acct1.
+func row(name, status string) string {
+	return fmt.Sprintf(`{"var":%q,"account":"my.1password.com","status":%q}`, name, status) + "\n"
+}
+
+// provRow is the row that carries the provenance of the source varItem(name)
+// yields under acct1.
+func provRow(name, status, detail string) string {
+	low := strings.ToLower(name)
+	return fmt.Sprintf(`{"var":%q,"account":"my.1password.com","vault":"Private","vault_id":"vault","item":"Title %s","item_id":"item-%s","field_id":"field-%s","source_id":%q,"status":%q,"detail":%q}`,
+		name, name, low, low, src(name).ID(), status, detail) + "\n"
+}
+
+func untrustedRow(name string) string {
+	return provRow(name, "untrusted", "source is not trusted")
+}
+
+// src2 is a source under acct2.
+func src2(itemID, name string) bundle.Source {
+	return bundle.Source{AccountUUID: "ACCT2", UserUUID: "USER2", VaultID: "vault", ItemID: itemID, FieldID: "field-" + strings.ToLower(name), Name: name}
+}
+
+// picking is an available picker that confirms exactly srcs.
+func picking(srcs ...bundle.Source) *trustpicker.Fake {
+	f := &trustpicker.Fake{IsAvailable: true, Selection: []string{}}
+	for _, s := range srcs {
+		f.Selection = append(f.Selection, s.ID())
+	}
+	return f
+}
+
+// trustedIDs returns the stored trusted source ids, sorted as stored.
+func trustedIDs(t *testing.T, kc *keychain.Fake) []string {
+	t.Helper()
+	var ids []string
+	for _, s := range decodeFake(t, kc).TrustedSources {
+		ids = append(ids, s.Name+"="+s.ID())
+	}
+	return ids
+}
+
+func wantTrusted(t *testing.T, kc *keychain.Fake, srcs ...bundle.Source) {
+	t.Helper()
+	var want []string
+	for _, s := range srcs {
+		want = append(want, s.Name+"="+s.ID())
+	}
+	got := trustedIDs(t, kc)
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("trusted sources = %v, want %v", got, want)
+	}
+}
+
 func TestSyncFirstRunAddsAll(t *testing.T) {
 	kc := &keychain.Fake{}
-	r := runSync(t, Deps{Keychain: kc, OnePass: fakeOp(varItem("ZED", "z"), varItem("ALPHA", "a"))})
+	picker := picking(src("ZED"), src("ALPHA"))
+	r := runSync(t, Deps{Keychain: kc, OnePass: fakeOp(varItem("ZED", "z"), varItem("ALPHA", "a")), Picker: picker})
 	want := `{"var":"ALPHA","account":"my.1password.com","status":"added"}` + "\n" +
 		`{"var":"ZED","account":"my.1password.com","status":"added"}` + "\n" + trailerOK
 	if r.stdout != want || r.code != 0 || r.stderr != "" {
@@ -103,7 +166,11 @@ func TestSyncFirstRunAddsAll(t *testing.T) {
 	}
 	b := decodeFake(t, kc)
 	if !b.GeneratedAt.Equal(fixedTime) || len(b.Vars) != 2 || b.Vars[0] != sv("ALPHA", "a") || b.Vars[1] != sv("ZED", "z") {
-		t.Fatalf("bundle = %+v", b)
+		t.Fatalf("bundle has %d vars or the wrong ones", len(b.Vars))
+	}
+	wantTrusted(t, kc, src("ALPHA"), src("ZED"))
+	if picker.Calls != 1 {
+		t.Fatalf("picker calls = %d", picker.Calls)
 	}
 }
 
@@ -137,11 +204,18 @@ func TestSyncRemovedVar(t *testing.T) {
 		t.Fatalf("code=%d writes=%d stdout=%q", r.code, kc.Writes, r.stdout)
 	}
 	if b := decodeFake(t, kc); len(b.Vars) != 1 || b.Vars[0].Name != "ALPHA" {
-		t.Fatalf("bundle = %+v", b)
+		t.Fatalf("bundle has %d vars", len(b.Vars))
 	}
+	// The source is gone from 1Password. Its trust is not.
+	wantTrusted(t, kc, src("ALPHA"), src("ZED"))
 }
 
-func TestSyncSelectionErrorsLeaveKeychainUntouched(t *testing.T) {
+// selectionErrorCases are items whose one field fails validation, with the
+// error row each yields.
+func selectionErrorCases() map[string]struct {
+	item onepass.Item
+	want string
+} {
 	cases := map[string]struct {
 		item onepass.Item
 		want string
@@ -179,20 +253,51 @@ func TestSyncSelectionErrorsLeaveKeychainUntouched(t *testing.T) {
 		"denylisted GIT_CONFIG_PARAMETERS": {varItem("GIT_CONFIG_PARAMETERS", "x"),
 			`{"var":"GIT_CONFIG_PARAMETERS","account":"my.1password.com","status":"error","detail":"item \"Title GIT_CONFIG_PARAMETERS\" (item-git_config_parameters): label GIT_CONFIG_PARAMETERS is denylisted"}`},
 	}
-	for name, tc := range cases {
+	return cases
+}
+
+// TestSyncTrustedSourceTurnsInvalidLeavesKeychainUntouched: a validation
+// failure on a trusted source aborts with no write.
+func TestSyncTrustedSourceTurnsInvalidLeavesKeychainUntouched(t *testing.T) {
+	for name, tc := range selectionErrorCases() {
 		t.Run(name, func(t *testing.T) {
-			kc := fakeBundle(t, sv("ALPHA", "a"))
-			r := runSync(t, Deps{Keychain: kc, OnePass: fakeOp(varItem("ALPHA", "a"), tc.item)})
-			want := tc.want + "\n" + `{"_meta":{"has_more":false,"error_count":1}}` + "\n"
+			f := tc.item.Fields[0]
+			bad := bundle.Source{AccountUUID: "ACCT", UserUUID: "USER", VaultID: "vault", ItemID: tc.item.ID, FieldID: f.ID, Name: f.Label}
+			kc := fakeTrusting(t, []bundle.Source{bad}, sv("ALPHA", "a"))
+			before := string(kc.Value)
+			r := runSync(t, Deps{Keychain: kc, OnePass: fakeOp(varItem("ALPHA", "new"), tc.item)})
+			want := tc.want + "\n" + trailer(1)
 			if r.stdout != want {
 				t.Fatalf("stdout = %q\nwant %q", r.stdout, want)
 			}
-			if r.code != 1 || r.stderr != "" || kc.Writes != 0 {
+			if r.code != 1 || r.stderr != "" || kc.Writes != 0 || string(kc.Value) != before {
 				t.Fatalf("code=%d stderr=%q writes=%d", r.code, r.stderr, kc.Writes)
 			}
-			if strings.Contains(r.stdout, marker) {
-				t.Fatalf("stdout leaks the value: %q", r.stdout)
+		})
+	}
+}
+
+// TestSyncUntrustedInvalidSourceIsErrorRowAndDoesNotBlock: anyone who can
+// write a tagged item can plant a denylisted or invalid field. It costs an
+// error row and exit 1. The trusted vars are still written.
+func TestSyncUntrustedInvalidSourceIsErrorRowAndDoesNotBlock(t *testing.T) {
+	for name, tc := range selectionErrorCases() {
+		t.Run(name, func(t *testing.T) {
+			kc := fakeBundle(t, sv("ALPHA", "old"))
+			picker := &trustpicker.Fake{IsAvailable: true}
+			r := runSync(t, Deps{Keychain: kc, OnePass: fakeOp(varItem("ALPHA", "new"), tc.item), Picker: picker})
+			want := row("ALPHA", "changed") + tc.want + "\n" + trailer(1)
+			if r.stdout != want {
+				t.Fatalf("stdout = %q\nwant %q", r.stdout, want)
 			}
+			if r.code != 1 || r.stderr != "" || kc.Writes != 1 || picker.Calls != 0 {
+				t.Fatalf("code=%d stderr=%q writes=%d picker calls=%d", r.code, r.stderr, kc.Writes, picker.Calls)
+			}
+			b := decodeFake(t, kc)
+			if len(b.Vars) != 1 || b.Vars[0] != sv("ALPHA", "new") {
+				t.Fatalf("bundle has %d vars or ALPHA was not updated", len(b.Vars))
+			}
+			wantTrusted(t, kc, src("ALPHA"))
 		})
 	}
 }
@@ -208,7 +313,7 @@ func twoAccountOp() *onepass.Fake {
 }
 
 func TestSyncConflictAcrossAccounts(t *testing.T) {
-	kc := &keychain.Fake{}
+	kc := fakeTrusting(t, []bundle.Source{src("TOKEN"), src2("item-token2", "TOKEN")})
 	r := runSync(t, Deps{Keychain: kc, OnePass: twoAccountOp()})
 	want := `{"var":"TOKEN","account":"","status":"conflict","detail":"conflict: TOKEN is defined by item item-token (my.1password.com) and item item-token2 (other.1password.com)"}` + "\n" +
 		`{"_meta":{"has_more":false,"error_count":1}}` + "\n"
@@ -221,7 +326,10 @@ func TestSyncConflictAcrossAccounts(t *testing.T) {
 }
 
 func TestSyncSameLabelTwiceInOneItemIsConflict(t *testing.T) {
-	kc := &keychain.Fake{}
+	first := bundle.Source{AccountUUID: "ACCT", UserUUID: "USER", VaultID: "vault", ItemID: "item-twice", FieldID: "field-token", Name: "TOKEN"}
+	second := first
+	second.FieldID = "field-token-2"
+	kc := fakeTrusting(t, []bundle.Source{first, second})
 	twice := opItem("item-twice", "Twice", secret("TOKEN", "one"), onepass.Field{ID: "field-token-2", Type: "CONCEALED", Label: "TOKEN", Value: marker + "-two"})
 	r := runSync(t, Deps{Keychain: kc, OnePass: fakeOp(twice)})
 	want := `{"var":"TOKEN","account":"","status":"conflict","detail":"conflict: TOKEN is defined by item item-twice field field-token (my.1password.com) and item item-twice field field-token-2 (my.1password.com)"}` + "\n" +
@@ -362,15 +470,77 @@ func TestSyncAccountVanished(t *testing.T) {
 		t.Fatalf("code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
 	}
 
-	r = runSync(t, Deps{Keychain: kc, OnePass: op}, "--forget-account", "ACCT")
+	// Forgetting the account drops its trust too. Nothing is trusted then,
+	// so the picker opens for what the remaining account offers.
+	picker := picking(src2("item-other", "OTHER"))
+	r = runSync(t, Deps{Keychain: kc, OnePass: op, Picker: picker}, "--forget-account", "ACCT")
 	wantOut := `{"var":"ALPHA","account":"my.1password.com","status":"removed"}` + "\n" +
 		`{"var":"OTHER","account":"other.1password.com","status":"added"}` + "\n" + trailerOK
 	if r.code != 0 || r.stdout != wantOut || r.stderr != "" || kc.Writes != 1 {
 		t.Fatalf("code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
 	}
 	if b := decodeFake(t, kc); len(b.Vars) != 1 || b.Vars[0].Name != "OTHER" || b.Vars[0].AccountUUID != "ACCT2" {
-		t.Fatalf("bundle = %+v", b)
+		t.Fatalf("bundle has %d vars", len(b.Vars))
 	}
+	wantTrusted(t, kc, src2("item-other", "OTHER"))
+}
+
+// TestSyncForgetAccountKeepsOtherTrust: --forget-account drops the trusted
+// sources of that account only.
+func TestSyncForgetAccountKeepsOtherTrust(t *testing.T) {
+	other := bundle.Var{Name: "OTHER", Value: marker + "-o", AccountUUID: "ACCT2", UserUUID: "USER2", AccountURL: "other.1password.com", VaultID: "vault", ItemID: "item-other", FieldID: "field-other"}
+	kc := fakeTrusting(t, []bundle.Source{src("GONE")}, sv("ALPHA", "a"), other)
+	op := &onepass.Fake{AccountList: []onepass.Account{acct2}, Items: map[string][]onepass.Item{
+		acct2.AccountUUID: {opItem("item-other", "Other", secret("OTHER", "o"))},
+	}}
+	picker := &trustpicker.Fake{IsAvailable: true}
+	r := runSync(t, Deps{Keychain: kc, OnePass: op, Picker: picker}, "--forget-account", "ACCT")
+	wantOut := row("ALPHA", "removed") + `{"var":"OTHER","account":"other.1password.com","status":"unchanged"}` + "\n" + trailerOK
+	if r.code != 0 || r.stdout != wantOut || r.stderr != "" || kc.Writes != 1 || picker.Calls != 0 {
+		t.Fatalf("code=%d writes=%d picker=%d stdout=%q stderr=%q", r.code, kc.Writes, picker.Calls, r.stdout, r.stderr)
+	}
+	wantTrusted(t, kc, src2("item-other", "OTHER"))
+}
+
+// TestSyncAccountKnownOnlyFromTrustedSourcesIsGuarded: a trusted source with
+// no var still names its account, so that account cannot vanish silently.
+func TestSyncAccountKnownOnlyFromTrustedSourcesIsGuarded(t *testing.T) {
+	gone := bundle.Source{AccountUUID: "ACCT9", UserUUID: "USER9", VaultID: "vault", ItemID: "item-gone", FieldID: "field-gone", Name: "GONE"}
+	kc := fakeTrusting(t, []bundle.Source{gone}, sv("ALPHA", "a"))
+	r := runSync(t, Deps{Keychain: kc, OnePass: fakeOp(varItem("ALPHA", "a"))})
+	want := `{"error":"account_missing","detail":"account ACCT9 user USER9 is in the keychain bundle but not in op account list","hint":"envsec sync --forget-account ACCT9"}` + "\n"
+	if r.code != 1 || r.stdout != "" || r.stderr != want || kc.Writes != 0 {
+		t.Fatalf("code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
+	}
+	r = runSync(t, Deps{Keychain: kc, OnePass: fakeOp(varItem("ALPHA", "a"))}, "--forget-account", "ACCT9")
+	if r.code != 0 || r.stdout != row("ALPHA", "unchanged")+trailerOK || kc.Writes != 1 {
+		t.Fatalf("code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
+	}
+	wantTrusted(t, kc, src("ALPHA"))
+}
+
+// TestSyncGuardsRunBeforeThePicker: a guard failure must not come after the
+// user already picked.
+func TestSyncGuardsRunBeforeThePicker(t *testing.T) {
+	t.Run("vanished account", func(t *testing.T) {
+		kc := legacyBundle(t, sv("ALPHA", "a"))
+		op := &onepass.Fake{AccountList: []onepass.Account{acct2}, Items: map[string][]onepass.Item{
+			acct2.AccountUUID: {opItem("item-other", "Other", secret("OTHER", "o"))},
+		}}
+		picker := &trustpicker.Fake{IsAvailable: true}
+		r := runSync(t, Deps{Keychain: kc, OnePass: op, Picker: picker})
+		if r.code != 1 || r.stdout != "" || !strings.Contains(r.stderr, `"error":"account_missing"`) || kc.Writes != 0 || picker.Calls != 0 {
+			t.Fatalf("code=%d writes=%d picker=%d stdout=%q stderr=%q", r.code, kc.Writes, picker.Calls, r.stdout, r.stderr)
+		}
+	})
+	t.Run("zero items", func(t *testing.T) {
+		kc := legacyBundle(t, sv("ALPHA", "a"))
+		picker := &trustpicker.Fake{IsAvailable: true}
+		r := runSync(t, Deps{Keychain: kc, OnePass: fakeOp(), Picker: picker})
+		if r.code != 1 || r.stdout != "" || !strings.Contains(r.stderr, `"error":"prune_refused"`) || kc.Writes != 0 || picker.Calls != 0 {
+			t.Fatalf("code=%d writes=%d picker=%d stdout=%q stderr=%q", r.code, kc.Writes, picker.Calls, r.stdout, r.stderr)
+		}
+	})
 }
 
 func TestSyncSameAccountDifferentUserIsMissing(t *testing.T) {
@@ -389,14 +559,17 @@ func TestSyncSameAccountDifferentUserIsMissing(t *testing.T) {
 		t.Fatalf("code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
 	}
 
-	r = runSync(t, Deps{Keychain: kc, OnePass: op}, "--forget-account", "ACCT")
+	newUser := src("ALPHA")
+	newUser.UserUUID = "USER-NEW"
+	r = runSync(t, Deps{Keychain: kc, OnePass: op, Picker: picking(newUser)}, "--forget-account", "ACCT")
 	wantOut := `{"var":"ALPHA","account":"my.1password.com","status":"changed"}` + "\n" + trailerOK
 	if r.code != 0 || r.stdout != wantOut || kc.Writes != 1 {
 		t.Fatalf("code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
 	}
 	if b := decodeFake(t, kc); len(b.Vars) != 1 || b.Vars[0].UserUUID != "USER-NEW" {
-		t.Fatalf("bundle = %+v", b)
+		t.Fatalf("bundle has %d vars", len(b.Vars))
 	}
+	wantTrusted(t, kc, newUser)
 }
 
 func TestSyncPruneRefusedWithoutFlag(t *testing.T) {
@@ -414,8 +587,10 @@ func TestSyncPruneRefusedWithoutFlag(t *testing.T) {
 		t.Fatalf("code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
 	}
 	if b := decodeFake(t, kc); len(b.Vars) != 0 {
-		t.Fatalf("bundle = %+v", b)
+		t.Fatalf("bundle has %d vars", len(b.Vars))
 	}
+	// --prune-all empties vars and keeps every trust decision.
+	wantTrusted(t, kc, src("ALPHA"), src("ZED"))
 }
 
 func TestSyncZeroItemsFirstRunRefusedWithoutPruneAll(t *testing.T) {
@@ -436,8 +611,8 @@ func TestSyncZeroItemsFirstRunRefusedWithoutPruneAll(t *testing.T) {
 			if r.code != 0 || r.stdout != trailerOK || r.stderr != "" || kc.Writes != 1 {
 				t.Fatalf("with --prune-all: code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
 			}
-			if b := decodeFake(t, kc); len(b.Vars) != 0 {
-				t.Fatalf("bundle = %+v", b)
+			if b := decodeFake(t, kc); len(b.Vars) != 0 || len(b.TrustedSources) != 0 {
+				t.Fatalf("bundle has %d vars and %d trusted sources", len(b.Vars), len(b.TrustedSources))
 			}
 		})
 	}
@@ -481,7 +656,7 @@ func TestSyncOpTimeoutIsExit2(t *testing.T) {
 // empty account, or sync would silently drop B's vars from the bundle.
 func TestSyncBlankListOutputOnSecondAccountAbortsWithoutWrite(t *testing.T) {
 	kc := fakeBundle(t, sv("ALPHA", "a"), bundle.Var{
-		Name: "BETA", Value: marker + "-b", AccountUUID: "ACCT2", UserUUID: "USER2", AccountURL: "other.1password.com", ItemID: "item-beta", FieldID: "field-beta",
+		Name: "BETA", Value: marker + "-b", AccountUUID: "ACCT2", UserUUID: "USER2", AccountURL: "other.1password.com", VaultID: "vault", ItemID: "item-beta", FieldID: "field-beta",
 	})
 	mustJSON := func(v any) []byte {
 		b, err := json.Marshal(v)
@@ -533,7 +708,7 @@ func TestSyncDropsItemWhoseFetchedCopyLacksTag(t *testing.T) {
 		stale.Fields = nil
 		return append(items, stale), err
 	}
-	r := runSync(t, Deps{Keychain: kc, OnePass: op})
+	r := runSync(t, Deps{Keychain: kc, OnePass: op, Picker: picking(src("ALPHA"))})
 	want := `{"var":"ALPHA","account":"my.1password.com","status":"added"}` + "\n" + trailerOK
 	if r.code != 0 || r.stdout != want || kc.Writes != 1 {
 		t.Fatalf("code=%d writes=%d stdout=%q stderr=%q", r.code, kc.Writes, r.stdout, r.stderr)
@@ -568,7 +743,7 @@ func TestSyncLockHeld(t *testing.T) {
 	}
 
 	release()
-	r = runCLI(t, Deps{Keychain: kc, OnePass: op, Now: func() time.Time { return fixedTime }}, "sync")
+	r = runCLI(t, Deps{Keychain: kc, OnePass: op, Picker: picking(src("ALPHA")), Now: func() time.Time { return fixedTime }}, "sync")
 	if r.code != 0 || kc.Writes != 1 {
 		t.Fatalf("after release: code=%d writes=%d stderr=%q", r.code, kc.Writes, r.stderr)
 	}
@@ -595,7 +770,7 @@ func TestAcquireLockReleaseAllowsNext(t *testing.T) {
 
 func TestSyncKeychainWriteError(t *testing.T) {
 	kc := &keychain.Fake{WriteErr: &keychain.UnavailableError{Detail: "locked"}}
-	r := runSync(t, Deps{Keychain: kc, OnePass: fakeOp(varItem("ALPHA", "a"))})
+	r := runSync(t, Deps{Keychain: kc, OnePass: fakeOp(varItem("ALPHA", "a")), Picker: picking(src("ALPHA"))})
 	want := `{"error":"keychain_unavailable","detail":"keychain unavailable: locked","hint":"unlock the login keychain and rerun envsec sync"}` + "\n"
 	if r.code != 4 || r.stdout != "" || r.stderr != want {
 		t.Fatalf("code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
@@ -604,7 +779,7 @@ func TestSyncKeychainWriteError(t *testing.T) {
 
 func TestSyncKeychainWriteLocked(t *testing.T) {
 	kc := &keychain.Fake{WriteErr: &keychain.LockedError{KeychainPath: "/k/login.keychain-db"}}
-	r := runSync(t, Deps{Keychain: kc, OnePass: fakeOp(varItem("ALPHA", "a"))})
+	r := runSync(t, Deps{Keychain: kc, OnePass: fakeOp(varItem("ALPHA", "a")), Picker: picking(src("ALPHA"))})
 	want := `{"error":"keychain_locked","detail":"keychain locked: /k/login.keychain-db (no UI session; typical over ssh)","hint":"security unlock-keychain /k/login.keychain-db"}` + "\n"
 	if r.code != 4 || r.stdout != "" || r.stderr != want {
 		t.Fatalf("code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
@@ -632,7 +807,7 @@ func TestSyncTagFlagReachesListTagged(t *testing.T) {
 	other := varItem("BETA", "b")
 	other.Tags = []string{"other"}
 	op := fakeOp(varItem("ALPHA", "a"), other)
-	r := runSync(t, Deps{Keychain: kc, OnePass: op}, "--tag", "other")
+	r := runSync(t, Deps{Keychain: kc, OnePass: op, Picker: picking(src("BETA"))}, "--tag", "other")
 	want := `{"var":"BETA","account":"my.1password.com","status":"added"}` + "\n" + trailerOK
 	if r.code != 0 || r.stdout != want {
 		t.Fatalf("code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)

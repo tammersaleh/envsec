@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -15,24 +16,72 @@ import (
 	"github.com/tammersaleh/envsec/internal/bundle"
 	"github.com/tammersaleh/envsec/internal/keychain"
 	"github.com/tammersaleh/envsec/internal/onepass"
+	"github.com/tammersaleh/envsec/internal/trustpicker"
 )
 
 var fixedTime = time.Date(2026, 9, 14, 17, 2, 11, 0, time.UTC)
 
+// sourcesOf returns the source of every var.
+func sourcesOf(vars []bundle.Var) []bundle.Source {
+	out := make([]bundle.Source, len(vars))
+	for i, v := range vars {
+		out[i] = v.Source()
+	}
+	return out
+}
+
+// fakeBundle is a keychain holding vars, each with its source trusted.
 func fakeBundle(t *testing.T, vars ...bundle.Var) *keychain.Fake {
 	t.Helper()
-	raw, err := bundle.Encode(bundle.Bundle{GeneratedAt: fixedTime, Vars: vars})
+	return fakeTrusting(t, nil, vars...)
+}
+
+// fakeTrusting is fakeBundle that also trusts extra, sources with no var.
+func fakeTrusting(t *testing.T, extra []bundle.Source, vars ...bundle.Var) *keychain.Fake {
+	t.Helper()
+	raw, err := bundle.Encode(bundle.Bundle{GeneratedAt: fixedTime, TrustedSources: append(sourcesOf(vars), extra...), Vars: vars})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return &keychain.Fake{Value: raw, Exists: true}
 }
 
+// legacyBundle is a keychain holding a schema 1 bundle: no trusted_sources
+// and no vault ids.
+func legacyBundle(t *testing.T, vars ...bundle.Var) *keychain.Fake {
+	t.Helper()
+	type legacyVar struct {
+		Name        string `json:"name"`
+		Value       string `json:"value"`
+		AccountUUID string `json:"account_uuid"`
+		UserUUID    string `json:"user_uuid"`
+		AccountURL  string `json:"account_url"`
+		ItemID      string `json:"item_id"`
+		FieldID     string `json:"field_id"`
+	}
+	doc := struct {
+		Schema      int         `json:"schema"`
+		GeneratedAt time.Time   `json:"generated_at"`
+		Vars        []legacyVar `json:"vars"`
+	}{Schema: 1, GeneratedAt: fixedTime, Vars: []legacyVar{}}
+	for _, v := range vars {
+		doc.Vars = append(doc.Vars, legacyVar{v.Name, v.Value, v.AccountUUID, v.UserUUID, v.AccountURL, v.ItemID, v.FieldID})
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &keychain.Fake{Value: []byte(base64.StdEncoding.EncodeToString(raw)), Exists: true}
+}
+
+// src is the source v(name, ...) was read from.
+func src(name string) bundle.Source { return v(name, "").Source() }
+
 func v(name, value string) bundle.Var {
 	return bundle.Var{
 		Name: name, Value: value,
 		AccountUUID: "ACCT", UserUUID: "USER", AccountURL: "my.1password.com",
-		ItemID: "item-" + strings.ToLower(name), FieldID: "field-" + strings.ToLower(name),
+		VaultID: "vault", ItemID: "item-" + strings.ToLower(name), FieldID: "field-" + strings.ToLower(name),
 	}
 }
 
@@ -51,6 +100,10 @@ func runCLI(t *testing.T, deps Deps, args ...string) result {
 	}
 	if deps.Env == nil {
 		deps.Env = func(string) string { return "" }
+	}
+	// Never the real terminal: the default picker has no one to talk to.
+	if deps.Picker == nil {
+		deps.Picker = &trustpicker.Fake{}
 	}
 	var out, errb bytes.Buffer
 	err := RunWith(args, &out, &errb, deps)
@@ -86,6 +139,32 @@ func TestHelpExitsZero(t *testing.T) {
 	r := runCLI(t, Deps{}, "--help")
 	if r.code != 0 || !strings.Contains(r.stderr, "Usage: envsec") || r.stdout != "" {
 		t.Fatalf("code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
+	}
+	for _, cmd := range []string{"version", "env", "list", "sync", "trust", "check"} {
+		if !strings.Contains(r.stderr, "\n  "+cmd+" ") {
+			t.Errorf("help lacks command %q:\n%s", cmd, r.stderr)
+		}
+	}
+}
+
+func TestTrustHelpNamesRevoke(t *testing.T) {
+	r := runCLI(t, Deps{}, "trust", "--help")
+	if r.code != 0 || r.stdout != "" || !strings.Contains(r.stderr, "--revoke") || !strings.Contains(r.stderr, "source-id") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
+	}
+}
+
+// TestEnvAndListRefuseLegacyBundle: a schema 1 bundle holds no trust
+// decisions, so neither command may use any of it.
+func TestEnvAndListRefuseLegacyBundle(t *testing.T) {
+	r := runCLI(t, Deps{Keychain: legacyBundle(t, v("ALPHA", "a"))}, "env")
+	if r.code != 4 || r.stdout != "" || r.stderr != "envsec: bundle predates source trust: schema 1; run envsec sync\n" {
+		t.Fatalf("env: code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
+	}
+	r = runCLI(t, Deps{Keychain: legacyBundle(t, v("ALPHA", "a"))}, "list")
+	want := `{"error":"bundle_untrusted","detail":"bundle predates source trust: schema 1","hint":"envsec sync"}` + "\n"
+	if r.code != 4 || r.stdout != "" || r.stderr != want {
+		t.Fatalf("list: code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
 	}
 }
 
@@ -233,8 +312,8 @@ func TestEnvUnreadableBundle(t *testing.T) {
 		"locked":         {&keychain.Fake{ReadErr: &keychain.LockedError{KeychainPath: "/k/login.keychain-db"}}, "envsec: keychain locked: /k/login.keychain-db (no UI session; typical over ssh); run security unlock-keychain /k/login.keychain-db\n"},
 		"bad base64":     {&keychain.Fake{Exists: true, Value: []byte("!!!")}, "envsec: bundle is not valid base64: illegal base64 data at input byte 0; run envsec sync\n"},
 		"bad json":       {&keychain.Fake{Exists: true, Value: []byte(base64.StdEncoding.EncodeToString([]byte("{")))}, "envsec: bundle is not valid JSON: unmarshal failed; run envsec sync\n"},
-		"no vars":        {&keychain.Fake{Exists: true, Value: []byte(base64.StdEncoding.EncodeToString([]byte(`{"schema":1,"generated_at":"2026-09-14T17:02:11Z"}`)))}, "envsec: bundle is not valid JSON: missing vars; run envsec sync\n"},
-		"unknown schema": {&keychain.Fake{Exists: true, Value: badSchema}, "envsec: bundle schema is not supported: got 99, want 1; run envsec sync\n"},
+		"no vars":        {&keychain.Fake{Exists: true, Value: []byte(base64.StdEncoding.EncodeToString([]byte(`{"schema":2,"generated_at":"2026-09-14T17:02:11Z","trusted_sources":[]}`)))}, "envsec: bundle is not valid JSON: missing vars; run envsec sync\n"},
+		"unknown schema": {&keychain.Fake{Exists: true, Value: badSchema}, "envsec: bundle schema is not supported: got 99, want 2; run envsec sync\n"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -343,8 +422,8 @@ func TestEnvZshReadonlyTargetDoesNotAbortEval(t *testing.T) {
 
 func TestList(t *testing.T) {
 	r := runCLI(t, Deps{Keychain: fakeBundle(t, v("ZED", "z"), v("ALPHA", "a"))}, "list")
-	want := `{"var":"ALPHA","account":"my.1password.com","item_id":"item-alpha","field_id":"field-alpha"}` + "\n" +
-		`{"var":"ZED","account":"my.1password.com","item_id":"item-zed","field_id":"field-zed"}` + "\n" +
+	want := `{"var":"ALPHA","account":"my.1password.com","vault_id":"vault","item_id":"item-alpha","field_id":"field-alpha","source_id":"` + src("ALPHA").ID() + `"}` + "\n" +
+		`{"var":"ZED","account":"my.1password.com","vault_id":"vault","item_id":"item-zed","field_id":"field-zed","source_id":"` + src("ZED").ID() + `"}` + "\n" +
 		`{"_meta":{"has_more":false,"generated_at":"2026-09-14T17:02:11Z"}}` + "\n"
 	if r.stdout != want {
 		t.Fatalf("stdout = %q\nwant %q", r.stdout, want)
@@ -354,6 +433,21 @@ func TestList(t *testing.T) {
 	}
 	if strings.Contains(r.stdout, `"z"`) || strings.Contains(r.stdout, `"a"`) {
 		t.Fatal("list printed a value")
+	}
+}
+
+// TestListShowsTrustedSourcesWithNoVar: an absent source's id is printed so
+// trust --revoke can name it.
+func TestListShowsTrustedSourcesWithNoVar(t *testing.T) {
+	absent := func(name string) string {
+		return `{"var":"` + name + `","account_uuid":"ACCT","vault_id":"vault","item_id":"item-` + strings.ToLower(name) + `","field_id":"field-` + strings.ToLower(name) + `","source_id":"` + src(name).ID() + `","status":"absent"}` + "\n"
+	}
+	r := runCLI(t, Deps{Keychain: fakeTrusting(t, []bundle.Source{src("ZGONE"), src("AGONE")}, v("MID", "m"))}, "list")
+	want := `{"var":"MID","account":"my.1password.com","vault_id":"vault","item_id":"item-mid","field_id":"field-mid","source_id":"` + src("MID").ID() + `"}` + "\n" +
+		absent("AGONE") + absent("ZGONE") +
+		`{"_meta":{"has_more":false,"generated_at":"2026-09-14T17:02:11Z"}}` + "\n"
+	if r.stdout != want || r.code != 0 || r.stderr != "" {
+		t.Fatalf("code=%d stderr=%q stdout = %q\nwant %q", r.code, r.stderr, r.stdout, want)
 	}
 }
 
@@ -429,6 +523,7 @@ func TestExitCode(t *testing.T) {
 		{"bad base64", bundle.ErrBadBase64, 4, "bundle_invalid"},
 		{"bad json", bundle.ErrBadJSON, 4, "bundle_invalid"},
 		{"schema", bundle.ErrUnknownSchema, 4, "bundle_invalid"},
+		{"legacy schema", bundle.ErrLegacySchema, 4, "bundle_untrusted"},
 		{"exit error", &ExitError{Code: 7, Err: "custom"}, 7, "custom"},
 	}
 	for _, tc := range cases {

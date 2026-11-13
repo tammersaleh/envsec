@@ -1,6 +1,6 @@
 // Package export holds the pure rules that turn 1Password fields into shell
-// exports: the label pattern, the denylist, field selection, conflict
-// detection, and zsh quoting. See SPEC.md "The 1Password contract" and
+// exports: the label pattern, the denylist, field selection, the split by
+// trust, conflict detection, and zsh quoting. See SPEC.md "The 1Password contract" and
 // "Hardening rules for env". It imports only stdlib and internal/bundle.
 package export
 
@@ -71,10 +71,12 @@ type Field struct {
 }
 
 // Item is the subset of a 1Password item that selection needs, plus the
-// account it came from.
+// account it came from. VaultName, Title, and AccountURL are display only.
 type Item struct {
 	ID          string
 	Title       string
+	VaultID     string
+	VaultName   string
 	AccountUUID string
 	UserUUID    string
 	AccountURL  string
@@ -82,77 +84,116 @@ type Item struct {
 	Fields      []Field
 }
 
-// SelectError is one field that Select refused. Reason is the human tail of
-// the message ("label PATH is denylisted"); Error renders it with the item.
-// It never carries a value.
+// Origin is where a selected field came from: its source tuple, which is its
+// identity, and the strings shown to the user, which are not. It holds no
+// value. The display strings come from 1Password unescaped.
+type Origin struct {
+	Source     bundle.Source
+	AccountURL string
+	VaultName  string
+	ItemTitle  string
+}
+
+// Candidate is one field that passed selection, with its value. Whether it
+// is exported depends on trust, which Select knows nothing about.
+type Candidate struct {
+	Origin
+	Value string
+}
+
+// Var is the bundle entry c would be stored as.
+func (c Candidate) Var() bundle.Var {
+	return bundle.Var{
+		Name:        c.Source.Name,
+		Value:       c.Value,
+		AccountUUID: c.Source.AccountUUID,
+		UserUUID:    c.Source.UserUUID,
+		AccountURL:  c.AccountURL,
+		VaultID:     c.Source.VaultID,
+		ItemID:      c.Source.ItemID,
+		FieldID:     c.Source.FieldID,
+	}
+}
+
+// SelectError is one field that Select refused. Source.Name is the label.
+// Reason is the human tail of the message ("label PATH is denylisted");
+// Error renders it with the item. It never carries a value.
 type SelectError struct {
-	ItemID    string
-	ItemTitle string
-	Label     string
-	Reason    string
+	Origin
+	Reason string
 }
 
 func (e *SelectError) Error() string {
-	return fmt.Sprintf("item %q (%s): %s", e.ItemTitle, e.ItemID, e.Reason)
+	return fmt.Sprintf("item %q (%s): %s", e.ItemTitle, e.Source.ItemID, e.Reason)
 }
 
-// Select picks the exportable vars from one in-scope item: every CONCEALED
-// field whose label matches LabelPattern. Fields with other types or labels
-// are ignored. A denylisted label, an empty value, or a value CheckValue
-// refuses is an error. A label repeated within the item is not: both vars are
-// returned and DetectConflicts reports them. All errors are returned; vars
-// are in field order. Error text never includes a value.
-func Select(item Item) ([]bundle.Var, []*SelectError) {
-	var vars []bundle.Var
+// Select picks the candidates from one in-scope item: every CONCEALED field
+// whose label matches LabelPattern. Fields with other types or labels are
+// ignored. A denylisted label, an empty value, a value CheckValue refuses,
+// or a source tuple with an empty part is an error. A label repeated within
+// the item is not: both candidates are returned and DetectConflicts reports
+// them. All errors are returned, in field order like the candidates. Both
+// carry the full source tuple. Error text never includes a value.
+func Select(item Item) ([]Candidate, []*SelectError) {
+	var cands []Candidate
 	var errs []*SelectError
-	fail := func(label, reason string) {
-		errs = append(errs, &SelectError{ItemID: item.ID, ItemTitle: item.Title, Label: label, Reason: reason})
-	}
 	for _, f := range item.Fields {
 		if f.Type != "CONCEALED" || !LabelPattern.MatchString(f.Label) {
 			continue
 		}
-		if Denied(f.Label) {
-			fail(f.Label, "label "+f.Label+" is denylisted")
+		origin := Origin{
+			Source: bundle.Source{
+				AccountUUID: item.AccountUUID,
+				UserUUID:    item.UserUUID,
+				VaultID:     item.VaultID,
+				ItemID:      item.ID,
+				FieldID:     f.ID,
+				Name:        f.Label,
+			},
+			AccountURL: item.AccountURL,
+			VaultName:  item.VaultName,
+			ItemTitle:  item.Title,
+		}
+		if reason := refuse(origin.Source, f.Value); reason != "" {
+			errs = append(errs, &SelectError{Origin: origin, Reason: reason})
 			continue
 		}
-		if f.Value == "" {
-			fail(f.Label, f.Label+" is empty")
-			continue
-		}
-		if err := CheckValue(f.Value); err != nil {
-			fail(f.Label, f.Label+" "+err.Error())
-			continue
-		}
-		vars = append(vars, bundle.Var{
-			Name:        f.Label,
-			Value:       f.Value,
-			AccountUUID: item.AccountUUID,
-			UserUUID:    item.UserUUID,
-			AccountURL:  item.AccountURL,
-			ItemID:      item.ID,
-			FieldID:     f.ID,
-		})
+		cands = append(cands, Candidate{Origin: origin, Value: f.Value})
 	}
-	return vars, errs
+	return cands, errs
 }
 
-// Source is one field that yields a conflicting var. Identity is
-// (AccountUUID, UserUUID, ItemID, FieldID); AccountURL is for display only
-// and never part of the key.
-type Source struct {
-	AccountURL  string
-	AccountUUID string
-	UserUUID    string
-	ItemID      string
-	FieldID     string
+// refuse returns why a field cannot be a candidate, or "".
+func refuse(src bundle.Source, value string) string {
+	if Denied(src.Name) {
+		return "label " + src.Name + " is denylisted"
+	}
+	if value == "" {
+		return src.Name + " is empty"
+	}
+	if err := CheckValue(value); err != nil {
+		return src.Name + " " + err.Error()
+	}
+	// A source with an empty part can never be trusted or stored.
+	for _, part := range []struct{ what, value string }{
+		{"account UUID", src.AccountUUID},
+		{"user UUID", src.UserUUID},
+		{"vault ID", src.VaultID},
+		{"item ID", src.ItemID},
+		{"field ID", src.FieldID},
+	} {
+		if part.value == "" {
+			return src.Name + " has no " + part.what
+		}
+	}
+	return ""
 }
 
 // ConflictError is one var name yielded by more than one source. Sources are
 // sorted by account URL, item ID, field ID, then identity.
 type ConflictError struct {
 	Name    string
-	Sources []Source
+	Sources []Origin
 }
 
 // Error names every source. When two sources share an item ID the field IDs
@@ -163,48 +204,51 @@ func (e *ConflictError) Error() string {
 	items := map[string]bool{}
 	urls := map[string]bool{}
 	identities := map[identity]bool{}
-	for _, s := range e.Sources {
-		items[s.ItemID] = true
-		urls[s.AccountURL] = true
-		identities[identity{s.AccountUUID, s.UserUUID}] = true
+	for _, o := range e.Sources {
+		items[o.Source.ItemID] = true
+		urls[o.AccountURL] = true
+		identities[identity{o.Source.AccountUUID, o.Source.UserUUID}] = true
 	}
 	showField := len(items) < len(e.Sources)
 	showIdentity := len(urls) < len(identities)
 	parts := make([]string, len(e.Sources))
-	for i, s := range e.Sources {
-		p := "item " + s.ItemID
+	for i, o := range e.Sources {
+		p := "item " + o.Source.ItemID
 		if showField {
-			p += " field " + s.FieldID
+			p += " field " + o.Source.FieldID
 		}
-		where := s.AccountURL
+		where := o.AccountURL
 		if showIdentity {
-			where += " account " + s.AccountUUID + " user " + s.UserUUID
+			where += " account " + o.Source.AccountUUID + " user " + o.Source.UserUUID
 		}
 		parts[i] = p + " (" + where + ")"
 	}
 	return fmt.Sprintf("conflict: %s is defined by %s", e.Name, strings.Join(parts, " and "))
 }
 
-// DetectConflicts returns one error per var name that is yielded by more than
+// conflictKey is conflict identity: (account, user, item, field). The vault
+// and the account URL are not part of it.
+type conflictKey struct{ account, user, item, field string }
+
+// DetectConflicts returns one error per name that is yielded by more than
 // one source, within one item, within one account, or across accounts. Two
-// vars with the same identity but different AccountURL are one source.
-// Errors are sorted by var name.
-func DetectConflicts(vars []bundle.Var) []*ConflictError {
-	type key struct{ account, user, item, field string }
-	byName := map[string][]Source{}
-	seen := map[string]map[key]bool{}
-	for _, v := range vars {
-		k := key{v.AccountUUID, v.UserUUID, v.ItemID, v.FieldID}
-		if seen[v.Name] == nil {
-			seen[v.Name] = map[key]bool{}
+// candidates with the same identity but different AccountURL are one source.
+// Errors are sorted by name. Pass only the candidates that should conflict
+// with each other: Split passes the trusted ones.
+func DetectConflicts(cands []Candidate) []*ConflictError {
+	byName := map[string][]Origin{}
+	seen := map[string]map[conflictKey]bool{}
+	for _, c := range cands {
+		name := c.Source.Name
+		k := conflictKey{c.Source.AccountUUID, c.Source.UserUUID, c.Source.ItemID, c.Source.FieldID}
+		if seen[name] == nil {
+			seen[name] = map[conflictKey]bool{}
 		}
-		if seen[v.Name][k] {
+		if seen[name][k] {
 			continue
 		}
-		seen[v.Name][k] = true
-		byName[v.Name] = append(byName[v.Name], Source{
-			AccountURL: v.AccountURL, AccountUUID: v.AccountUUID, UserUUID: v.UserUUID, ItemID: v.ItemID, FieldID: v.FieldID,
-		})
+		seen[name][k] = true
+		byName[name] = append(byName[name], c.Origin)
 	}
 	var errs []*ConflictError
 	for _, name := range slices.Sorted(maps.Keys(byName)) {
@@ -212,22 +256,98 @@ func DetectConflicts(vars []bundle.Var) []*ConflictError {
 		if len(srcs) < 2 {
 			continue
 		}
-		slices.SortFunc(srcs, func(a, b Source) int {
+		slices.SortFunc(srcs, func(a, b Origin) int {
 			for _, c := range []int{
 				strings.Compare(a.AccountURL, b.AccountURL),
-				strings.Compare(a.ItemID, b.ItemID),
-				strings.Compare(a.FieldID, b.FieldID),
-				strings.Compare(a.AccountUUID, b.AccountUUID),
+				strings.Compare(a.Source.ItemID, b.Source.ItemID),
+				strings.Compare(a.Source.FieldID, b.Source.FieldID),
+				strings.Compare(a.Source.AccountUUID, b.Source.AccountUUID),
 			} {
 				if c != 0 {
 					return c
 				}
 			}
-			return strings.Compare(a.UserUUID, b.UserUUID)
+			return strings.Compare(a.Source.UserUUID, b.Source.UserUUID)
 		})
 		errs = append(errs, &ConflictError{Name: name, Sources: srcs})
 	}
 	return errs
+}
+
+// Partition is a resolution judged against a set of trusted sources. See
+// SPEC.md "Trust". Slices keep the order they were given in.
+type Partition struct {
+	// Trusted candidates become the bundle's vars, unless Fatal.
+	Trusted []Candidate
+	// Untrusted candidates are valid and could be trusted. Two of them may
+	// share a name with each other or with a trusted candidate. That is not
+	// a conflict.
+	Untrusted []Candidate
+	// TrustedProblems are validation failures on trusted sources. Fatal.
+	TrustedProblems []*SelectError
+	// UntrustedProblems are validation failures on sources that are not
+	// trusted. They cannot be trusted and never block a write.
+	UntrustedProblems []*SelectError
+	// Conflicts are names yielded by more than one trusted candidate. Fatal.
+	Conflicts []*ConflictError
+}
+
+// Fatal reports whether a trusted source failed, which aborts with no write.
+func (p Partition) Fatal() bool {
+	return len(p.TrustedProblems) > 0 || len(p.Conflicts) > 0
+}
+
+// Vars returns the trusted candidates as bundle vars. Names are unique only
+// when Conflicts is empty.
+func (p Partition) Vars() []bundle.Var {
+	vars := make([]bundle.Var, len(p.Trusted))
+	for i, c := range p.Trusted {
+		vars[i] = c.Var()
+	}
+	return vars
+}
+
+// Split judges candidates and problems against trusted, matching on the
+// whole source tuple. Conflicts are detected among the trusted candidates
+// only. A source that appears more than once, as when one sign-in is listed
+// under two account URLs, is kept once.
+func Split(cands []Candidate, problems []*SelectError, trusted []bundle.Source) Partition {
+	isTrusted := make(map[bundle.Source]bool, len(trusted))
+	for _, s := range trusted {
+		isTrusted[s] = true
+	}
+	var p Partition
+	seen := map[bundle.Source]bool{}
+	for _, c := range cands {
+		if seen[c.Source] {
+			continue
+		}
+		seen[c.Source] = true
+		if isTrusted[c.Source] {
+			p.Trusted = append(p.Trusted, c)
+		} else {
+			p.Untrusted = append(p.Untrusted, c)
+		}
+	}
+	type failure struct {
+		source bundle.Source
+		reason string
+	}
+	failed := map[failure]bool{}
+	for _, e := range problems {
+		k := failure{e.Source, e.Reason}
+		if failed[k] {
+			continue
+		}
+		failed[k] = true
+		if isTrusted[e.Source] {
+			p.TrustedProblems = append(p.TrustedProblems, e)
+		} else {
+			p.UntrustedProblems = append(p.UntrustedProblems, e)
+		}
+	}
+	p.Conflicts = DetectConflicts(p.Trusted)
+	return p
 }
 
 // CheckValue is the one rule for what a value may hold, shared by Select

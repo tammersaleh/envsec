@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/tammersaleh/envsec/internal/bundle"
 	"github.com/tammersaleh/envsec/internal/keychain"
 	"github.com/tammersaleh/envsec/internal/onepass"
+	"github.com/tammersaleh/envsec/internal/trustpicker"
 )
 
 // Globals are the flags every command accepts. See SPEC.md "Global flags".
@@ -30,7 +32,8 @@ type CLI struct {
 	Version VersionCmd `cmd:"" help:"Print the build version."`
 	Env     EnvCmd     `cmd:"" help:"Print export lines from the keychain bundle for eval."`
 	List    ListCmd    `cmd:"" help:"Print the bundle's provenance, no values."`
-	Sync    SyncCmd    `cmd:"" help:"Copy tagged 1Password fields into the keychain bundle."`
+	Sync    SyncCmd    `cmd:"" help:"Copy trusted, tagged 1Password fields into the keychain bundle."`
+	Trust   TrustCmd   `cmd:"" help:"Choose which 1Password fields sync may export, then sync."`
 	Check   CheckCmd   `cmd:"" help:"Compare 1Password against the keychain bundle."`
 }
 
@@ -41,6 +44,9 @@ type Deps struct {
 	OnePass  onepass.Client
 	Now      func() time.Time
 	Env      func(string) string
+	// Picker asks the user which sources to trust. Commands never read
+	// os.Stdin or test for a terminal themselves.
+	Picker trustpicker.Picker
 }
 
 // DepsBuilder constructs Deps once the global flags are known.
@@ -60,6 +66,9 @@ func RealDeps(g Globals, stderr io.Writer) Deps {
 		OnePass:  newOnePass(onepass.Options{Timeout: g.Timeout, Verbose: g.Verbose, Stderr: stderr}),
 		Now:      time.Now,
 		Env:      os.Getenv,
+		// The real files, never the wrapped stderr: the picker needs them to
+		// tell whether a person is there.
+		Picker: trustpicker.New(os.Stdin, os.Stderr),
 	}
 }
 
@@ -94,6 +103,9 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) error {
 		}
 		if deps.Env == nil {
 			deps.Env = real.Env
+		}
+		if deps.Picker == nil {
+			deps.Picker = real.Picker
 		}
 		return deps
 	})
@@ -146,14 +158,18 @@ func report(stderr io.Writer, err error) error {
 	return e
 }
 
-// readBundle reads and decodes the keychain bundle, mapping every failure to
-// an exit-4 *ExitError.
+// readBundle is the strict reader for env and list. It maps every failure
+// to an exit-4 *ExitError. A schema 1 bundle is bundle_untrusted: it holds
+// no trust decisions, so nothing in it may be used.
 func readBundle(rc *runContext) (bundle.Bundle, error) {
 	raw, err := rc.deps.Keychain.Read(rc.ctx)
 	if err != nil {
 		return bundle.Bundle{}, asExit(err)
 	}
 	b, err := bundle.Decode(raw)
+	if errors.Is(err, bundle.ErrLegacySchema) {
+		return bundle.Bundle{}, asExit(err)
+	}
 	if err != nil {
 		return bundle.Bundle{}, &ExitError{Code: ExitKeychain, Err: "bundle_invalid", Detail: err.Error(), Hint: hintSync}
 	}

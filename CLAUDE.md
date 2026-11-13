@@ -9,7 +9,8 @@ is how to work in the repo. Sibling repos with the same conventions:
 
 1Password items tagged `shell-env` (in every account `op` is signed in to)
 carry CONCEALED fields whose labels are env var names. `envsec sync` copies
-those into the login keychain. `envsec env` prints `export` lines from the
+those into the login keychain, but only fields the user trusted with
+`envsec trust` (or the picker on the first `sync`). `envsec env` prints `export` lines from the
 keychain for the shell to `eval`. Shells never call `op`. See `SPEC.md` and
 `docs/plan.md`.
 
@@ -188,8 +189,11 @@ build cache and GPG keyring access).
 
 ## Dependencies and Go version
 
-Kong for CLI parsing (`github.com/alecthomas/kong`), nothing else beyond
-stdlib unless SPEC says so. Go 1.25.
+Kong for CLI parsing (`github.com/alecthomas/kong`) and `charm.land/huh/v2`
+for the trust picker, nothing else beyond stdlib unless SPEC says so. huh is
+locked at v2.0.3: Dependabot ignores it, only `internal/trustpicker` imports
+it, and it brings 24 indirect modules. Bump it by hand and read its diff. Go
+1.25 (`go.mod` says 1.25.8, the minimum huh accepts).
 
 ## Notes for future sessions
 
