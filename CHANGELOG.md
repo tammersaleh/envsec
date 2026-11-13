@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.0.0](https://github.com/tammersaleh/envsec/compare/v1.0.4...v2.0.0) (2026-11-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* the keychain bundle schema, the `sync` and `check` row statuses, and first-run behavior changed. Existing bundles export nothing until `envsec sync` is run and sources are trusted.
+
+### Features
+
+* export only 1Password fields the user trusted ([82897e6](https://github.com/tammersaleh/envsec/commit/82897e617f420107ee0eecf35ee399219d105810))
+
+
+### Bug Fixes
+
+* env rejects an empty value ([d8f6242](https://github.com/tammersaleh/envsec/commit/d8f6242ecc86a72c477d87e5ad79ec11d8276486))
+
 ## [1.0.4](https://github.com/tammersaleh/envsec/compare/v1.0.3...v1.0.4) (2026-11-13)
 
 
