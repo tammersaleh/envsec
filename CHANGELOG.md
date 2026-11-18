@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.1](https://github.com/tammersaleh/envsec/compare/v2.0.0...v2.0.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* build with Go 1.27 ([7400db6](https://github.com/tammersaleh/envsec/commit/7400db6394c6ff948ac3f0f17e3d48ca80b7e58d))
+
 ## [2.0.0](https://github.com/tammersaleh/envsec/compare/v1.0.4...v2.0.0) (2026-11-13)
 
 
