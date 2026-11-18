@@ -139,7 +139,10 @@ against the fakes. The real keychain implementation has one integration test
 login keychain and cleans up after itself. Nothing in the test suite calls the
 real `op`. Fixtures are scrubbed JSON captured once from the real CLI.
 
-golangci-lint is v2 (v1 predates Go 1.25 and emits false positives). `errcheck`
+golangci-lint is v2, pinned in `mise.toml`. It must be built with a Go at least
+as new as the code: 2.12.2 fails typecheck on Go 1.27 sources, 2.15.0 works.
+mise does not rebuild it when Go changes, so after a Go bump run `mise install
+--force go:github.com/golangci/golangci-lint/v2/cmd/golangci-lint`. `errcheck`
 is off for `_test.go` only. See `.golangci.yml`.
 
 ## Output and error contract
@@ -193,7 +196,9 @@ Kong for CLI parsing (`github.com/alecthomas/kong`) and `charm.land/huh/v2`
 for the trust picker, nothing else beyond stdlib unless SPEC says so. huh is
 locked at v2.0.3: Dependabot ignores it, only `internal/trustpicker` imports
 it, and it brings 24 indirect modules. Bump it by hand and read its diff. Go
-1.25 (`go.mod` says 1.25.8, the minimum huh accepts).
+1.27 (`mise.toml` floats to the newest 1.27 patch, `go.mod` says 1.27.0). Stay
+on a Go release that still gets security fixes, or `govulncheck` findings in
+the standard library never clear.
 
 ## Notes for future sessions
 

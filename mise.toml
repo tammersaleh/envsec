@@ -1,10 +1,11 @@
 [tools]
-go = "1.25"
-# golangci-lint v2 (v1.64.x predates Go 1.25 and its bundled x/tools emits
-# false-positive staticcheck findings on 1.25 sources).
-"go:github.com/golangci/golangci-lint/v2/cmd/golangci-lint" = "2.12.2"
-# govulncheck is pinned to 1.1.4 because newer releases need Go 1.26.
-"go:golang.org/x/vuln/cmd/govulncheck" = "1.1.4"
+go = "1.27"
+# golangci-lint must be built with a Go at least as new as the code. 2.12.2
+# cannot read Go 1.27 export data. Rebuild it after a Go bump:
+# `mise install --force go:github.com/golangci/golangci-lint/v2/cmd/golangci-lint`.
+"go:github.com/golangci/golangci-lint/v2/cmd/golangci-lint" = "2.15.0"
+# govulncheck must run on the Go above so it scans that standard library.
+"go:golang.org/x/vuln/cmd/govulncheck" = "1.9.0"
 
 [tasks.build]
 run = "go build -o envsec ./cmd/envsec"
